@@ -13,6 +13,7 @@ if not (project_root / "main.py").is_file():
 
 datas = [
     (str(project_root / "configs" / "config.json"), "configs"),
+    (str(project_root / "configs" / "movement_games.json"), "configs"),
     (str(project_root / "full_model" / "pose_landmarker_full.task"), "full_model"),
 ]
 binaries = []

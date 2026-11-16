@@ -54,6 +54,7 @@ from .graph_viewer import InteractiveGraphViewer, open_graph_viewer
 from .joint_graph import GraphAngleSelection, graph_angle_traces
 from .playback import FrameBuffer, FrameNavigationButton, FramePlayback, open_review_video, review_window_is_covered
 from .preferences import DEFAULT_FRAME_JUMP, MAX_FRAME_JUMP
+from .trim_subvideos import TrimSubVideosDialog
 
 LOGGER = logging.getLogger("AIHuMoDataStudio.Mode1")
 
@@ -644,6 +645,7 @@ class AnnotationDialog(QDialog):
         self.camera_angle.setEnabled(is_activity)
         self.exercise_selector.movement_type.setEnabled(is_set)
         self.exercise_selector.exercise_name.setEnabled(is_set)
+        self.exercise_selector.exercise_variation.setEnabled(is_set)
         self.set_id.setEnabled(is_set)
         self.rep_id.setEnabled(is_rep)
         self.auto_rep_id.setEnabled(is_rep)
@@ -953,6 +955,13 @@ class AnnotationStudio(ReviewWindow):
         self.graph_viewer_button.setToolTip("Open this recording and frame in the graph viewer.")
         self.graph_viewer_button.clicked.connect(self.open_annotation_graph)
         header.addWidget(self.graph_viewer_button)
+        self.trim_subvideos_button = QPushButton("Trim 2 Sub…")
+        self.trim_subvideos_button.setToolTip(
+            "Mode 1 Annotation: split this recording into one or more sub-videos while "
+            "keeping matching Parquet rows and annotations."
+        )
+        self.trim_subvideos_button.clicked.connect(self.open_trim_subvideos)
+        header.addWidget(self.trim_subvideos_button)
         main.addLayout(header)
 
         context_group = QGroupBox("Current annotation context")
@@ -1174,6 +1183,18 @@ class AnnotationStudio(ReviewWindow):
             LOGGER.exception("Could not open annotation graph viewer")
             QMessageBox.critical(self, "Could Not Open Interactive Graph Viewer", str(exc))
 
+    def open_trim_subvideos(self) -> None:
+        """Open the editable sub-video trim table for the current recording."""
+        processed_root = self.parquet_path.parent.parent.parent
+        dialog = TrimSubVideosDialog(
+            video_path=self.video_path,
+            features_path=self.parquet_path,
+            output_root=processed_root,
+            parent=self,
+            title="Mode 1 Annotation · Trim 2 Sub Videos",
+        )
+        dialog.exec()
+
     def _clear_annotation_graph_window(self) -> None:
         self.annotation_graph_window = None
         if self._linked_graph_viewer is not None:
@@ -1354,6 +1375,7 @@ class AnnotationStudio(ReviewWindow):
         self.editor_notes.setEnabled(True)
         self.editor_exercise_selector.movement_type.setEnabled(is_set)
         self.editor_exercise_selector.exercise_name.setEnabled(is_set)
+        self.editor_exercise_selector.exercise_variation.setEnabled(is_set)
         self.editor_set_id.setEnabled(is_set)
         self.editor_rep_id.setEnabled(is_rep)
         self.editor_phase.setEnabled(is_phase)
@@ -2456,15 +2478,25 @@ class AnnotationStudio(ReviewWindow):
 
 def open_annotation_studio(parent=None, video_path=None, parquet_path=None, *,
                            metadata_path=None, annotation_json_path=None,
-                           frame_jump=DEFAULT_FRAME_JUMP):
+                           frame_jump=DEFAULT_FRAME_JUMP, preferences=None):
     if video_path is None:
-        video_path, _ = QFileDialog.getOpenFileName(parent, "Select processed skeleton video", "", "Video Files (*.mp4 *.mov *.avi *.mkv);;All Files (*)")
+        start_dir = getattr(getattr(preferences, "values", None), "default_skeleton_directory", "") or ""
+        video_path, _ = QFileDialog.getOpenFileName(parent, "Select processed skeleton video", start_dir, "Video Files (*.mp4 *.mov *.avi *.mkv);;All Files (*)")
         if not video_path:
             return
     if parquet_path is None:
-        parquet_path, _ = QFileDialog.getOpenFileName(parent, "Select feature Parquet", "", "Parquet (*.parquet);;All Files (*)")
+        start_dir = getattr(getattr(preferences, "values", None), "default_features_directory", "") or ""
+        parquet_path, _ = QFileDialog.getOpenFileName(parent, "Select feature Parquet", start_dir, "Parquet (*.parquet);;All Files (*)")
         if not parquet_path:
             return
+    if annotation_json_path is None:
+        # Keep annotations separate when the user configured an annotation
+        # directory, while preserving the historical feature-sidecar default
+        # for existing installations that have no such preference.
+        default_annotation_dir = getattr(getattr(preferences, "values", None), "default_annotations_directory", "") or ""
+        if default_annotation_dir:
+            annotation_name = annotation_json_for_features(Path(parquet_path)).name
+            annotation_json_path = str(Path(default_annotation_dir) / annotation_name)
     window = AnnotationStudio(
         video_path, parquet_path, annotation_json_path=annotation_json_path,
         metadata_path=metadata_path, parent=parent, frame_jump=frame_jump,

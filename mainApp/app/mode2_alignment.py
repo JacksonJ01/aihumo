@@ -29,6 +29,7 @@ from .graph_navigation import FrameZoomToolbar, centered_time_limits, wheel_zoom
 from .mode1_annotation import AnnotationStudio
 from .playback import FrameBuffer, PlaybackSpeed, review_window_is_covered
 from .preferences import DEFAULT_FRAME_JUMP
+from .trim_subvideos import TrimSubVideosDialog, trim_aligned_recordings
 
 
 class SessionAlignmentWindow(ReviewWindow):
@@ -73,6 +74,11 @@ class SessionAlignmentWindow(ReviewWindow):
         self.load_button = self._button(toolbar, "Load alignment…", self._load)
         self.save_button = self._button(toolbar, "Save alignment…", self._save)
         self.export_button = self._button(toolbar, "Export trimmed clips…", self._export)
+        self.trim_subvideos_button = self._button(toolbar, "Trim 2 Sub…", self.open_trim_subvideos)
+        self.trim_subvideos_button.setToolTip(
+            "Mode 2 Session Alignment: split all selected cameras into matching sub-sessions "
+            "with aligned Parquet and annotation records."
+        )
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
 
@@ -246,6 +252,28 @@ class SessionAlignmentWindow(ReviewWindow):
         if folder:
             self._run_job("Writing trimmed skeleton clips…", export_session, self._export_finished,
                           Path(folder), self.recordings, self.maps, *self.review_window)
+
+    def open_trim_subvideos(self) -> None:
+        """Open the shared editable trim table for all aligned cameras."""
+        if self.review_window is None or not self.recordings:
+            QMessageBox.information(self, "Trim sub-sessions", "Load and align recordings before creating sub-sessions.")
+            return
+        sources = [{"recording": recording, "mapping": mapping}
+                   for recording, mapping in zip(self.recordings, self.maps)]
+        first = self.recordings[0]
+        dialog = TrimSubVideosDialog(
+            video_path=first.video,
+            features_path=first.features,
+            output_root=self.processed_root,
+            parent=self,
+            title="Mode 2 Session Alignment · Trim 2 Sub Videos",
+            time_start=self.review_window[0],
+            time_end=self.review_window[1],
+            export_callback=lambda segments, root, report: trim_aligned_recordings(
+                sources=sources, segments=segments, output_root=root, progress=report,
+            ),
+        )
+        dialog.exec()
 
     def _export_finished(self, output):
         QMessageBox.information(self, "Export complete", f"Trimmed clips and alignment saved in\n{output}")

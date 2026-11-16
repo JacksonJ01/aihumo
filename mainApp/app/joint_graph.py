@@ -843,7 +843,11 @@ class JointGraphWidget(QWidget):
         measurements = [(title, kind, part) for title, kind, part, _ in OVERVIEW_MEASUREMENTS
                         if self._measurement_actions[part].isChecked()]
         row_count = max(1, ceil(len(measurements) / 2))
-        scroll_groups = all_graphs and not timeline_only
+        # Both the combined overview and the source-comparison view can create
+        # more panels than the window can display. Keep the requested 2x2
+        # layout for four sources and let the chart scroll vertically instead
+        # of compressing or clipping the lower row.
+        scroll_groups = (all_graphs or compare) and not timeline_only
         self._scroll_graphs = scroll_groups
         self.chart_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded if scroll_groups else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -854,9 +858,11 @@ class JointGraphWidget(QWidget):
             if scroll_groups else "Scroll to zoom. Turn on Zoom to Seek to move the playhead when zooming."
         )
         graph_height = grouped_height if compare else 330
-        self.canvas.setMinimumHeight(
-            round(graph_height * row_count / 2) * len(sources) + gap_space if scroll_groups else 0
-        )
+        if scroll_groups and compare and not all_graphs:
+            canvas_height = graph_height * 2 + gap_space
+        else:
+            canvas_height = round(graph_height * row_count / 2) * len(sources) + gap_space
+        self.canvas.setMinimumHeight(canvas_height if scroll_groups else 0)
 
         def add_panel(slot, source, kind, title, compact, time_axis="full", *, part=None):
             if kind == LANDMARK_MODE and component == "positions-speed" and part is None:

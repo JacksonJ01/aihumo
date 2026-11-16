@@ -38,6 +38,12 @@ class DesktopPreferences:
     default_frame_jump: int = DEFAULT_FRAME_JUMP
     default_camera_name: str = "camera_01"
     default_viewpoint: str = ""
+    default_camera_angle: str = "Front"
+    default_source_directory: str = ""
+    default_skeleton_directory: str = ""
+    default_features_directory: str = ""
+    default_annotations_directory: str = ""
+    default_output_directory: str = ""
     default_playback_speed: float = 1.0
     playback_loop: bool = False
     autosave_interval_s: int = 30
@@ -64,7 +70,6 @@ class DesktopPreferences:
     default_annotation_layer: str = "activity_state"
     default_activity_state: str = "active"
     default_phase_schema: str = "eccentric, concentric, hold"
-    auto_update_context: bool = True
     inherit_annotation_context: bool = True
     default_form_label: str = "unlabeled"
     timeline: dict = field(default_factory=timeline_preferences)
@@ -116,6 +121,12 @@ class PreferenceStore:
                 default_frame_jump=jump if type(jump) is int and 1 <= jump <= MAX_FRAME_JUMP else DEFAULT_FRAME_JUMP,
                 default_camera_name=text("default_camera_name", "camera_01"),
                 default_viewpoint=text("default_viewpoint"),
+                default_camera_angle=text("default_camera_angle", "Front") if text("default_camera_angle", "Front") in {"N/A", "Front", "Side", "Rear", "Three-quarter", "Low angle", "High angle", "Camera adjustment", "Unknown"} else "Front",
+                default_source_directory=text("default_source_directory"),
+                default_skeleton_directory=text("default_skeleton_directory"),
+                default_features_directory=text("default_features_directory"),
+                default_annotations_directory=text("default_annotations_directory"),
+                default_output_directory=text("default_output_directory"),
                 default_playback_speed=bounded_number("default_playback_speed", 1.0, 0.1, 5.0),
                 playback_loop=flag("playback_loop", False),
                 autosave_interval_s=bounded_number("autosave_interval_s", 30, 0, 3600, integer=True),
@@ -142,7 +153,6 @@ class PreferenceStore:
                 default_annotation_layer=text("default_annotation_layer", "activity_state"),
                 default_activity_state=text("default_activity_state", "active"),
                 default_phase_schema=text("default_phase_schema", "eccentric, concentric, hold"),
-                auto_update_context=flag("auto_update_context", True),
                 inherit_annotation_context=flag("inherit_annotation_context", True),
                 default_form_label=text("default_form_label", "unlabeled"),
                 timeline=timeline_preferences(data.get("timeline")),
@@ -172,11 +182,12 @@ class StartupSetupDialog(QDialog):
         super().__init__(parent)
         self.store = store
         self.setWindowTitle("AIHuMo first-run setup")
-        self.resize(560, 260)
+        self.resize(760, 540)
         outer = QVBoxLayout(self)
         intro = QLabel(
-            "This optional setup remembers a participant ID and an opening video "
-            "for this computer. You can skip it and configure everything later."
+            "Set up the first-run workspace for this computer. AIHuMo remembers the "
+            "participant, preferred camera angle, starter video, and default folders "
+            "used by later file pickers. Nothing is copied or uploaded."
         )
         intro.setWordWrap(True)
         outer.addWidget(intro)
@@ -185,6 +196,12 @@ class StartupSetupDialog(QDialog):
         self.participant_edit = QLineEdit(store.values.default_participant)
         self.participant_edit.setPlaceholderText("e.g. P001 or Alex")
         form.addRow("Participant ID (optional)", self.participant_edit)
+
+        self.camera_angle_combo = QComboBox()
+        for label in ("N/A", "Front", "Side", "Rear", "Three-quarter", "Low angle", "High angle", "Camera adjustment", "Unknown"):
+            self.camera_angle_combo.addItem(label, label)
+        self.camera_angle_combo.setCurrentText(store.values.default_camera_angle)
+        form.addRow("Default camera angle", self.camera_angle_combo)
 
         video_row = QWidget()
         video_layout = QHBoxLayout(video_row)
@@ -196,6 +213,17 @@ class StartupSetupDialog(QDialog):
         video_layout.addWidget(self.video_edit, 1)
         video_layout.addWidget(browse)
         form.addRow("Starter video (optional)", video_row)
+
+        self.source_directory = QLineEdit(store.values.default_source_directory)
+        self.skeleton_directory = QLineEdit(store.values.default_skeleton_directory)
+        self.features_directory = QLineEdit(store.values.default_features_directory)
+        self.annotations_directory = QLineEdit(store.values.default_annotations_directory)
+        self.output_directory = QLineEdit(store.values.default_output_directory)
+        form.addRow("Default video folder", self._directory_row(self.source_directory, "Choose default video folder"))
+        form.addRow("Default skeleton folder", self._directory_row(self.skeleton_directory, "Choose default skeleton folder"))
+        form.addRow("Default features folder", self._directory_row(self.features_directory, "Choose default Parquet folder"))
+        form.addRow("Default annotations folder", self._directory_row(self.annotations_directory, "Choose default annotation folder"))
+        form.addRow("Default output folder", self._directory_row(self.output_directory, "Choose default output folder"))
         outer.addLayout(form)
 
         self.open_video = QCheckBox("Open the starter video after setup")
@@ -216,6 +244,21 @@ class StartupSetupDialog(QDialog):
         outer.addLayout(actions)
         self.setup = {}
 
+    def _directory_row(self, edit: QLineEdit, title: str) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("Browse…")
+        button.clicked.connect(lambda: self._browse_directory(edit, title))
+        layout.addWidget(edit, 1)
+        layout.addWidget(button)
+        return row
+
+    def _browse_directory(self, edit: QLineEdit, title: str) -> None:
+        path = QFileDialog.getExistingDirectory(self, title, edit.text().strip() or "")
+        if path:
+            edit.setText(path)
+
     def _starter_video_changed(self, text: str) -> None:
         has_video = bool(text.strip())
         if has_video and not self.open_video.isEnabled():
@@ -224,7 +267,7 @@ class StartupSetupDialog(QDialog):
 
     def _browse_video(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choose starter video", "",
+            self, "Choose starter video", self.source_directory.text().strip() or "",
             "Video Files (*.mp4 *.mov *.avi *.mkv *.webm);;All Files (*)",
         )
         if path:
@@ -240,8 +283,26 @@ class StartupSetupDialog(QDialog):
             default_participant=participant if participant else self.store.values.default_participant,
             starter_video=video,
             setup_completed=True,
+            default_camera_angle=self.camera_angle_combo.currentData() or "Front",
+            default_source_directory=self.source_directory.text().strip(),
+            default_skeleton_directory=self.skeleton_directory.text().strip(),
+            default_features_directory=self.features_directory.text().strip(),
+            default_annotations_directory=self.annotations_directory.text().strip(),
+            default_output_directory=self.output_directory.text().strip(),
         ))
-        self.setup = {"participant": participant, "video": video, "open_video": bool(video and self.open_video.isChecked())}
+        self.setup = {
+            "participant": participant,
+            "video": video,
+            "open_video": bool(video and self.open_video.isChecked()),
+            "camera_angle": self.camera_angle_combo.currentData() or "Front",
+            "directories": {
+                "source": self.source_directory.text().strip(),
+                "skeleton": self.skeleton_directory.text().strip(),
+                "features": self.features_directory.text().strip(),
+                "annotations": self.annotations_directory.text().strip(),
+                "output": self.output_directory.text().strip(),
+            },
+        }
 
     def _save(self) -> None:
         try:
@@ -343,6 +404,20 @@ class PreferencesDialog(QDialog):
         self.default_frame_jump.setSuffix(" frames")
         self.default_frame_jump.setToolTip("Starting Up/Down jump in Mode 1 and the Interactive Graph Viewer.")
         defaults.addRow("Default frame jump", self.default_frame_jump)
+        self.default_camera_angle = QComboBox()
+        self.default_camera_angle.addItems(("N/A", "Front", "Side", "Rear", "Three-quarter", "Low angle", "High angle", "Camera adjustment", "Unknown"))
+        self.default_camera_angle.setCurrentText(store.values.default_camera_angle)
+        defaults.addRow("Default camera angle", self.default_camera_angle)
+        self.default_source_directory = QLineEdit(store.values.default_source_directory)
+        self.default_skeleton_directory = QLineEdit(store.values.default_skeleton_directory)
+        self.default_features_directory = QLineEdit(store.values.default_features_directory)
+        self.default_annotations_directory = QLineEdit(store.values.default_annotations_directory)
+        self.default_output_directory = QLineEdit(store.values.default_output_directory)
+        defaults.addRow("Video folder", self._directory_row(self.default_source_directory, "Choose default video folder"))
+        defaults.addRow("Skeleton folder", self._directory_row(self.default_skeleton_directory, "Choose default skeleton folder"))
+        defaults.addRow("Features folder", self._directory_row(self.default_features_directory, "Choose default Parquet folder"))
+        defaults.addRow("Annotations folder", self._directory_row(self.default_annotations_directory, "Choose default annotation folder"))
+        defaults.addRow("Output folder", self._directory_row(self.default_output_directory, "Choose default output folder"))
         layout.addLayout(defaults)
 
         # Keep the existing General and Timeline pages stable while exposing
@@ -408,13 +483,11 @@ class PreferencesDialog(QDialog):
         self.default_annotation_layer = QComboBox(); self.default_annotation_layer.addItems(("activity_state", "set", "rep", "phase", "form_interval", "other")); self.default_annotation_layer.setCurrentText(store.values.default_annotation_layer)
         self.default_activity_state = QComboBox(); self.default_activity_state.addItems(("active", "idle", "transition")); self.default_activity_state.setCurrentText(store.values.default_activity_state)
         self.default_phase_schema = QLineEdit(store.values.default_phase_schema)
-        self.auto_update_context = QCheckBox("Update context automatically over saved frames"); self.auto_update_context.setChecked(store.values.auto_update_context)
         self.inherit_annotation_context = QCheckBox("Inherit parent set/rep context"); self.inherit_annotation_context.setChecked(store.values.inherit_annotation_context)
         self.default_form_label = QComboBox(); self.default_form_label.addItems(("unlabeled", "good", "acceptable", "poor")); self.default_form_label.setCurrentText(store.values.default_form_label)
         annotation_form.addRow("Default annotation layer", self.default_annotation_layer)
         annotation_form.addRow("Default activity state", self.default_activity_state)
         annotation_form.addRow("Default phases", self.default_phase_schema)
-        annotation_form.addRow(self.auto_update_context)
         annotation_form.addRow(self.inherit_annotation_context)
         annotation_form.addRow("Default form label", self.default_form_label)
 
@@ -422,6 +495,21 @@ class PreferencesDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+
+    def _directory_row(self, edit: QLineEdit, title: str) -> QWidget:
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("Browse…")
+        button.clicked.connect(lambda: self._browse_directory(edit, title))
+        row_layout.addWidget(edit, 1)
+        row_layout.addWidget(button)
+        return row
+
+    def _browse_directory(self, edit: QLineEdit, title: str) -> None:
+        path = QFileDialog.getExistingDirectory(self, title, edit.text().strip() or "")
+        if path:
+            edit.setText(path)
 
     def _set_color(self, field: str, color: str) -> None:
         button = self.color_buttons[field]
@@ -469,6 +557,12 @@ class PreferencesDialog(QDialog):
             default_frame_jump=self.default_frame_jump.value(),
             default_camera_name=self.default_camera_name.text().strip(),
             default_viewpoint=self.default_viewpoint.text().strip(),
+            default_camera_angle=self.default_camera_angle.currentText(),
+            default_source_directory=self.default_source_directory.text().strip(),
+            default_skeleton_directory=self.default_skeleton_directory.text().strip(),
+            default_features_directory=self.default_features_directory.text().strip(),
+            default_annotations_directory=self.default_annotations_directory.text().strip(),
+            default_output_directory=self.default_output_directory.text().strip(),
             default_playback_speed=self.default_playback_speed.value(),
             playback_loop=self.playback_loop.isChecked(),
             autosave_interval_s=self.autosave_interval_s.value(),
@@ -495,7 +589,6 @@ class PreferencesDialog(QDialog):
             default_annotation_layer=self.default_annotation_layer.currentText(),
             default_activity_state=self.default_activity_state.currentText(),
             default_phase_schema=self.default_phase_schema.text().strip(),
-            auto_update_context=self.auto_update_context.isChecked(),
             inherit_annotation_context=self.inherit_annotation_context.isChecked(),
             default_form_label=self.default_form_label.currentText(),
             timeline=timeline,

@@ -49,6 +49,7 @@ from aihumo.config import load_config
 from aihumo.processing import process_video, processing_job_status
 from .preferences import ParticipantPicker, PreferenceStore
 from .processing_resume import processing_fields, restore_processing_fields
+from .trim_subvideos import processed_inventory
 
 LOGGER = logging.getLogger("AIHuMoDataStudio.Mode0Batch")
 
@@ -249,6 +250,7 @@ class BatchSessionDialog(QDialog):
         self.camera_angle_combo = QComboBox()
         for label, value in CAMERA_ANGLE_OPTIONS:
             self.camera_angle_combo.addItem(label, value)
+        self.camera_angle_combo.setCurrentText(self.preferences.values.default_camera_angle)
         self.apply_camera_defaults_button = QPushButton("Apply shared camera defaults to all rows")
         self.apply_camera_defaults_button.clicked.connect(self.apply_camera_defaults)
         self.recording_date_edit = QLineEdit()
@@ -257,7 +259,10 @@ class BatchSessionDialog(QDialog):
         self.notes_edit = QTextEdit()
         self.notes_edit.setMaximumHeight(70)
         self.model_edit = QLineEdit()
-        self.output_edit = QLineEdit(str(PROJECT_ROOT / "data" / "processed"))
+        self.output_edit = QLineEdit(
+            self.preferences.values.default_output_directory
+            or str(PROJECT_ROOT / "data" / "processed")
+        )
         self.open_mode1_check = QCheckBox("Open the first completed recording in Mode 1")
         self.open_mode1_check.setChecked(True)
         form.addRow("Participant ID*", self.participant_picker)
@@ -271,6 +276,9 @@ class BatchSessionDialog(QDialog):
         form.addRow("Shared notes", self.notes_edit)
         form.addRow("MediaPipe model", self._browse_row(self.model_edit, self.browse_model, "MediaPipe Task (*.task);;All Files (*)"))
         form.addRow("Output root", self._browse_row(self.output_edit, self.browse_output, ""))
+        self.processed_inventory_label = QLabel()
+        self.processed_inventory_label.setWordWrap(True)
+        form.addRow("Processed inventory", self.processed_inventory_label)
         form.addRow("Next step", self.open_mode1_check)
         body.addLayout(form)
 
@@ -291,6 +299,8 @@ class BatchSessionDialog(QDialog):
         default_model = PROJECT_ROOT / "full_model" / "pose_landmarker_full.task"
         if default_model.exists():
             self.model_edit.setText(str(default_model))
+        self.output_edit.textChanged.connect(self.refresh_processed_inventory)
+        self.refresh_processed_inventory()
         self.refresh_recording_table()
 
     @staticmethod
@@ -305,7 +315,9 @@ class BatchSessionDialog(QDialog):
         return row
 
     def add_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select a session folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select a session folder", self.preferences.values.default_source_directory or ""
+        )
         if not folder:
             return
         path = Path(folder).expanduser().resolve()
@@ -366,6 +378,17 @@ class BatchSessionDialog(QDialog):
         path = QFileDialog.getExistingDirectory(self, "Select output root", self.output_edit.text())
         if path:
             self.output_edit.setText(path)
+
+    def refresh_processed_inventory(self) -> None:
+        try:
+            inventory = processed_inventory(self.output_edit.text().strip())
+            self.processed_inventory_label.setText(
+                f"{inventory['sessionCount']} session folder(s), "
+                f"{inventory['recordingCount']} recording folder(s); "
+                f"next available session: {inventory['nextSessionId']}"
+            )
+        except Exception as exc:
+            self.processed_inventory_label.setText(f"Inventory unavailable: {type(exc).__name__}")
 
     def _build_recordings(self) -> list[BatchRecording]:
         recordings: list[BatchRecording] = []

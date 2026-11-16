@@ -136,7 +136,7 @@ export default function NavBar() {
   const notRoot = pathname !== '/';
   const isActivePath = (p: string) => notRoot && pathname.startsWith(p);
   const isProgramsActive = notRoot && ['/programs', '/browsePrograms', '/progress'].some(p => pathname.startsWith(p));
-  const startActive = isActivePath('/workouts');
+  const startActive = isActivePath('/workouts') || isActivePath('/annotation-hub');
   const communityActive = notRoot && ['/community', '/friends'].some(p => pathname.startsWith(p));
   const notificationsActive = isActivePath('/notifications');
   const profileActive = notRoot && ['/profile', '/help'].some(p => pathname.startsWith(p));
@@ -608,7 +608,8 @@ export default function NavBar() {
                 >
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <Link href="/workouts" onClick={() => setWorkoutOpen(false)} style={{ whiteSpace: 'nowrap', color: 'inherit' }}>Start Workout</Link>
-                    <Link href="/workouts/annotation" target="_blank" rel="noopener" onClick={() => setWorkoutOpen(false)} style={{ whiteSpace: 'nowrap', color: 'inherit' }}>Annotation Studio ↗</Link>
+                    <Link href="/annotation-hub" onClick={() => setWorkoutOpen(false)} style={{ whiteSpace: 'nowrap', color: 'inherit' }}>Annotation Hub</Link>
+                    <Link href="/workouts/annotation" onClick={() => setWorkoutOpen(false)} style={{ whiteSpace: 'nowrap', color: 'inherit' }}>Annotation Studio</Link>
                   </div>
                 </PortalMenu>
               </div>
@@ -861,10 +862,11 @@ export default function NavBar() {
                 >
                   Workout ▾
                 </button>
-                <div style={{ overflow: 'hidden', maxHeight: workoutMobileOpen ? 180 : 0, opacity: workoutMobileOpen ? 1 : 0, transition: 'max-height 220ms ease, opacity 180ms ease' }}>
+                <div style={{ overflow: 'hidden', maxHeight: workoutMobileOpen ? 230 : 0, opacity: workoutMobileOpen ? 1 : 0, transition: 'max-height 220ms ease, opacity 180ms ease' }}>
                   <div style={{ paddingLeft: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <Link href="/workouts" onClick={() => { setMobileMenuOpen(false); setWorkoutMobileOpen(false); setActiveFor(null); }} style={{ color: 'white' }}>Start Workout</Link>
-                    <Link href="/workouts/annotation" target="_blank" rel="noopener" onClick={() => { setMobileMenuOpen(false); setWorkoutMobileOpen(false); setActiveFor(null); }} style={{ color: 'white' }}>Annotation Studio ↗</Link>
+                    <Link href="/annotation-hub" onClick={() => { setMobileMenuOpen(false); setWorkoutMobileOpen(false); setActiveFor(null); }} style={{ color: 'white' }}>Annotation Hub</Link>
+                    <Link href="/workouts/annotation" onClick={() => { setMobileMenuOpen(false); setWorkoutMobileOpen(false); setActiveFor(null); }} style={{ color: 'white' }}>Annotation Studio</Link>
                   </div>
                 </div>
               </div>

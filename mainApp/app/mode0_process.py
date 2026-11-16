@@ -20,6 +20,7 @@ from aihumo.config import load_config
 from aihumo.processing import process_video, processing_job_status
 from .preferences import ParticipantPicker, PreferenceStore
 from .processing_resume import restore_processing_fields
+from .trim_subvideos import processed_inventory
 
 LOGGER = logging.getLogger("AIHuMoDataStudio.Mode0")
 
@@ -104,10 +105,14 @@ class ProcessVideoDialog(QDialog):
         self.camera_angle_combo = QComboBox()
         for label, value in CAMERA_ANGLE_OPTIONS:
             self.camera_angle_combo.addItem(label, value)
+        self.camera_angle_combo.setCurrentText(self.preferences.values.default_camera_angle)
         self.environment_edit = QLineEdit()
         self.operator_edit = QLineEdit()
         self.notes_edit = QTextEdit(); self.notes_edit.setMaximumHeight(80)
-        self.output_edit = QLineEdit(str(PROJECT_ROOT / "data" / "processed"))
+        self.output_edit = QLineEdit(
+            self.preferences.values.default_output_directory
+            or str(PROJECT_ROOT / "data" / "processed")
+        )
         self.open_mode1_check = QCheckBox("Open Mode 1 automatically after successful processing")
         self.open_mode1_check.setChecked(True)
 
@@ -126,6 +131,9 @@ class ProcessVideoDialog(QDialog):
         form.addRow("Notes", self.notes_edit)
         form.addRow("MediaPipe model", self._browse_row(self.model_edit, self.browse_model, "MediaPipe Task (*.task);;All Files (*)"))
         form.addRow("Output root", self._browse_row(self.output_edit, self.browse_output, ""))
+        self.processed_inventory_label = QLabel()
+        self.processed_inventory_label.setWordWrap(True)
+        form.addRow("Processed inventory", self.processed_inventory_label)
         form.addRow("Next step", self.open_mode1_check)
         self.status = QLabel("Required: source video, participant ID, session ID, video ID, and camera ID.")
         self.status.setWordWrap(True)
@@ -150,6 +158,8 @@ class ProcessVideoDialog(QDialog):
         self.video_id_edit.textChanged.connect(self.refresh_job_status)
         self.model_edit.textChanged.connect(self.refresh_job_status)
         self.output_edit.textChanged.connect(self.refresh_job_status)
+        self.output_edit.textChanged.connect(self.refresh_processed_inventory)
+        self.refresh_processed_inventory()
 
     @staticmethod
     def _browse_row(edit: QLineEdit, callback, file_filter: str):
@@ -159,7 +169,8 @@ class ProcessVideoDialog(QDialog):
         return row
 
     def browse_video(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select source video", "", "Video Files (*.mp4 *.mov *.avi *.mkv *.webm);;All Files (*)")
+        start_dir = self.preferences.values.default_source_directory or ""
+        path, _ = QFileDialog.getOpenFileName(self, "Select source video", start_dir, "Video Files (*.mp4 *.mov *.avi *.mkv *.webm);;All Files (*)")
         if path:
             self.video_edit.setText(path)
             if self.video_id_edit.text() == "V001":
@@ -178,6 +189,17 @@ class ProcessVideoDialog(QDialog):
         path = QFileDialog.getExistingDirectory(self, "Select output root", self.output_edit.text())
         if path:
             self.output_edit.setText(path)
+
+    def refresh_processed_inventory(self):
+        try:
+            inventory = processed_inventory(self.output_edit.text().strip())
+            self.processed_inventory_label.setText(
+                f"{inventory['sessionCount']} session folder(s), "
+                f"{inventory['recordingCount']} recording folder(s); "
+                f"next available session: {inventory['nextSessionId']}"
+            )
+        except Exception as exc:
+            self.processed_inventory_label.setText(f"Inventory unavailable: {type(exc).__name__}")
 
     def refresh_job_status(self):
         source = Path(self.video_edit.text().strip())

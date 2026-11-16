@@ -1,10 +1,20 @@
 """Optional, grouped terminal report for the pipeline's synthetic test data."""
 
 from itertools import groupby
+from pathlib import Path
 from shutil import get_terminal_size
+import sys
 from textwrap import fill
 
 import pytest
+
+# Keep the repository's src-layout importable when pytest is launched from the
+# project virtual environment.  This avoids requiring every developer or CI
+# job to set PYTHONPATH manually, while packaging still controls production
+# imports.
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 
 @pytest.fixture(scope="session")

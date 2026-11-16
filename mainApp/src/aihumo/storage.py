@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,18 @@ def save_arrow_parquet_atomic(table: pa.Table | pa.RecordBatchReader, path: str 
                 # temporary file with a non-syncable descriptor. The atomic
                 # replace remains the durability boundary in that case.
                 pass
-        os.replace(temp_path, path)
+        # Windows can briefly hold the destination while a Qt/model reader is
+        # closing it. Keep replacement atomic, but tolerate that short-lived
+        # sharing violation instead of turning a valid annotation save into a
+        # user-visible failure.
+        for attempt in range(6):
+            try:
+                os.replace(temp_path, path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.025 * (attempt + 1))
         return path
     finally:
         temp_path.unlink(missing_ok=True)

@@ -17,7 +17,10 @@ export default function WorkoutAnnotationPage() {
         eyebrow="Workout annotation"
         title="Turn workout footage into structured training data."
         description="Load a video locally from desktop or phone, mark activity, sets, repetitions, phases, and form intervals, then export portable AIHuMo annotation JSON."
-        actions={[{ href: "/workouts", label: "Back to workout studio", secondary: true }]}
+        actions={[
+          { href: "/annotation-hub", label: "Back to annotation hub", secondary: true },
+          { href: "/workouts", label: "Workout studio" },
+        ]}
         aside={
           <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
             <StatCard label="Video privacy" value="Local" detail="Video bytes remain in this browser." icon={ShieldCheck} />

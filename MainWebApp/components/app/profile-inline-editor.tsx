@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useState, type ReactNode } from "react";
+import { useActionState, useEffect, useState } from "react";
 
 import { updateProfileFieldAction } from "@/app/profile/actions";
 import { initialAuthActionState } from "@/lib/auth-form";

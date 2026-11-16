@@ -69,6 +69,23 @@ Evaluation
 Future real-time inference
 ```
 
+## Hub Page and movement-game backend
+
+The **AIHuMo Hub Page** launches the processing/annotation pipeline, Justice
+Dance, and the configured movement games. Games do not rerun pose detection.
+They consume the same processed `*_features.parquet` used by Modes 1–4.
+
+Game definitions live in `configs/movement_games.json`. The shared backend in
+`src/aihumo/game_engine.py` provides calibration, variable-FPS timing,
+deterministic targets, pause/resume/reset/completion states, difficulty-aware
+tolerances, scoring events, reaction times, streaks, and JSON session
+summaries. Seeking or repainting previews a frame without scoring it twice.
+
+The desktop game workspace can optionally load a second feature Parquet for
+Mirror Mode or Partner Sync. Other modes use their own rule backend for target
+entry/avoidance, paths, rhythm, pose holds, balance, sports reaction,
+rehabilitation control, ergonomic posture, and gait symmetry.
+
 
 ## Optional target participant tracking (v0.5)
 

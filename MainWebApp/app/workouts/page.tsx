@@ -57,6 +57,7 @@ async function WorkoutsPageContent() {
         title="Start training with a setup that makes the next rep obvious."
         description="The workout studio keeps preparation, live tracking, and recent session context in one place so the training flow stays clear from start to finish."
         actions={[
+          { href: "/annotation-hub", label: "Open annotation hub", secondary: true },
           { href: "/progress", label: "Review progress", secondary: true },
           { href: "/programs", label: "Open current programs" },
         ]}

@@ -8,7 +8,7 @@ from PyQt6.QtCore import QProcess, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QComboBox, QDialog, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QStyle, QToolButton,
-    QVBoxLayout, QWidget,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,7 @@ from .pose_viewer import PoseGraphViewer
 from .preferences import PreferencesDialog, PreferenceStore, StartupSetupDialog
 from .quality_review import QualityReviewDialog
 from .processing_resume import processing_fields
+from .movement_games import MovementGameDialog, load_game_definitions
 from aihumo.recent_work import RecentWorkStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -61,6 +62,82 @@ class ModeTile(QPushButton):
                 self.open_requested.emit()
         else:
             super().keyPressEvent(event)
+
+
+class MainHubDialog(QDialog):
+    """Small extensible product hub for the AIHuMo launcher.
+
+    The hub intentionally does not assume that future tools are installed in
+    the same folder.  Each entry can later receive a configured executable,
+    URL, or Python entry point without changing the launcher layout.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("AIHuMo Hub Page")
+        self.resize(900, 680)
+        layout = QVBoxLayout(self)
+        title = QLabel("AIHuMo Hub Page")
+        title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        description = QLabel(
+            "Choose the AIHuMo pipeline, connected tools, or movement games. Every game "
+            "uses the same processed skeleton video and feature Parquet as the analysis modes."
+        )
+        description.setWordWrap(True)
+        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(description)
+
+        entries = QGridLayout()
+        entries.setHorizontalSpacing(12)
+        entries.setVerticalSpacing(12)
+        self.aihumo_button = QPushButton("AIHuMo Pipeline")
+        self.aihumo_button.setToolTip("Return to the AIHuMo Data Studio launcher.")
+        self.aihumo_button.clicked.connect(self.accept)
+        self.justice_dance_button = QPushButton("Justice Dance")
+        self.justice_dance_button.setToolTip("Open the shared rhythm movement workspace for Justice Dance.")
+        self.justice_dance_button.clicked.connect(lambda: self.open_game("just_dance"))
+        for button in (self.aihumo_button, self.justice_dance_button):
+            button.setMinimumHeight(70)
+            entries.addWidget(button, 0, 0 if button is self.aihumo_button else 1)
+        layout.addLayout(entries)
+        movement_title = QLabel("Movement Games and Analysis")
+        movement_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        layout.addWidget(movement_title)
+        game_scroll = QScrollArea()
+        game_scroll.setWidgetResizable(True)
+        game_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        game_content = QWidget()
+        game_grid = QGridLayout(game_content)
+        game_grid.setHorizontalSpacing(10)
+        game_grid.setVerticalSpacing(10)
+        self.game_buttons = {}
+        for index, definition in enumerate(load_game_definitions()):
+            button = QPushButton(definition.title)
+            button.setMinimumHeight(58)
+            button.setToolTip(f"{definition.description}\nObjective: {definition.objective}")
+            button.clicked.connect(lambda checked=False, game_id=definition.id: self.open_game(game_id))
+            self.game_buttons[definition.id] = button
+            game_grid.addWidget(button, index // 3, index % 3)
+        game_scroll.setWidget(game_content)
+        layout.addWidget(game_scroll, 1)
+        layout.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.reject)
+        layout.addWidget(close)
+
+    def _justice_dance_placeholder(self) -> None:
+        QMessageBox.information(
+            self,
+            "Justice Dance",
+            "The Justice Dance entry is ready in the Main Hub. Its application target "
+            "can be connected when the Justice Dance project is added to this computer.",
+        )
+
+    def open_game(self, game_id: str) -> None:
+        """Open a game while keeping the Hub Page available behind it."""
+        MovementGameDialog(game_id, self).exec()
 
 
 class ProcessingCard(QStackedWidget):
@@ -102,7 +179,7 @@ class HomeWindow(QMainWindow):
 
     def __init__(self, *, state_dir: Path | None = None, processed_root: Path | None = None):
         super().__init__()
-        self.setWindowTitle("AIHuMo Data Studio")
+        self.setWindowTitle("AIHuMo Hub Page")
         self.resize(960, 690)
         self.annotation_window = None
         self.graph_window = None
@@ -126,7 +203,7 @@ class HomeWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(50, 45, 50, 45)
 
-        title = QLabel("AIHuMo Data Studio")
+        title = QLabel("AIHuMo Hub Page")
         title.setStyleSheet("font-size: 28px; font-weight: 700;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header = QHBoxLayout()
@@ -156,7 +233,9 @@ class HomeWindow(QMainWindow):
         self.process_button = self.processing_card.single
         self.batch_button = self.processing_card.batch
         self.annotate_button = ModeTile("Annotate Existing Data\nMode 1")
+        self.annotate_button.setToolTip("Mode 1 Annotation and Trim 2 Sub Videos")
         self.alignment_button = ModeTile("Session Alignment\nMode 2")
+        self.alignment_button.setToolTip("Mode 2 Annotation Alignment and Trim 2 Sub Videos")
         self.viewer_button = ModeTile("Interactive Graph Viewer (2D)\nMode 3")
         self.pose_button = ModeTile("Interactive Graph Viewer (3D)\nMode 4")
         self.model_button = ModeTile("Model Suite\nMode 5 — Coming Soon")
@@ -177,7 +256,11 @@ class HomeWindow(QMainWindow):
             (self.pose_button, lambda: self._show_graph_viewer(mode=4)),
             (self.model_button, self.open_model_suite),
         ), start=1):
-            button.setToolTip("Click to update Resume. Double-click or press Enter to open.")
+            hover_help = {
+                1: "Mode 1 Annotation and Trim 2 Sub Videos. Click to update Resume; double-click or press Enter to open.",
+                2: "Mode 2 Annotation Alignment and Trim 2 Sub Videos. Click to update Resume; double-click or press Enter to open.",
+            }.get(mode, "Click to update Resume. Double-click or press Enter to open.")
+            button.setToolTip(hover_help)
             button.clicked.connect(lambda _checked, mode=mode: self._select_mode(mode))
             button.open_requested.connect(open_workspace)
         buttons.addWidget(self.processing_card, 0, 0)
@@ -200,6 +283,16 @@ class HomeWindow(QMainWindow):
 
         self.resume_group, self.resume_combo, self.resume_button, self.resume_remove_button = self._resume_controls()
         layout.addWidget(self.resume_group)
+        hub_group = QGroupBox("Hub Page")
+        hub_layout = QHBoxLayout(hub_group)
+        hub_description = QLabel("Open AIHuMo and other connected games or analysis tools from one place.")
+        hub_description.setWordWrap(True)
+        hub_layout.addWidget(hub_description, 1)
+        self.main_hub_button = QPushButton("Open Hub Page")
+        self.main_hub_button.setToolTip("Choose AIHuMo Pipeline, Justice Dance, or a movement game.")
+        self.main_hub_button.clicked.connect(self.open_main_hub)
+        hub_layout.addWidget(self.main_hub_button)
+        layout.addWidget(hub_group)
         self._select_mode(self._selected_mode)
         if self._using_default_state and not self.preferences.values.setup_completed:
             QTimer.singleShot(0, self.open_startup_setup)
@@ -309,6 +402,12 @@ class HomeWindow(QMainWindow):
         if PreferencesDialog(self.preferences, self).exec() == QDialog.DialogCode.Accepted:
             self._apply_launcher_accent()
 
+    def open_main_hub(self):
+        dialog = MainHubDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.raise_()
+            self.activateWindow()
+
     def open_startup_setup(self):
         dialog = StartupSetupDialog(self.preferences, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -337,7 +436,24 @@ class HomeWindow(QMainWindow):
             QMessageBox.warning(self, "Starter video unavailable", "The saved starter video no longer exists.")
             return
         if parquet is not None:
-            self._show_graph_viewer(mode=3, video_path=video, parquet_path=parquet)
+            # A processed starter recording is a resume point for annotation,
+            # not a second file-selection workflow.  The graph viewer remains
+            # available from Mode 1 and from its own launcher button.
+            try:
+                self._select_mode(1)
+                self.annotation_window = open_annotation_studio(
+                    self,
+                    video_path=video,
+                    parquet_path=parquet,
+                    frame_jump=self.preferences.values.default_frame_jump,
+                    preferences=self.preferences,
+                )
+                if self.annotation_window is not None:
+                    self.remember_window(self.annotation_window)
+                    self._activate_review(self.annotation_window)
+            except Exception as exc:
+                LOGGER.exception("Could not open processed starter recording")
+                QMessageBox.critical(self, "Could Not Open Starter Recording", f"{type(exc).__name__}: {exc}")
             return
         # A raw video is not processed silently: open Mode 0 with it prefilled
         # so the user can review the participant/output choices before running.
@@ -366,6 +482,7 @@ class HomeWindow(QMainWindow):
                     parquet_path=dialog.result.features_path,
                     metadata_path=dialog.result.metadata_path,
                     frame_jump=self.preferences.values.default_frame_jump,
+                    preferences=self.preferences,
                 )
                 if self.annotation_window is not None:
                     self.remember_window(self.annotation_window, dialog.result)
@@ -376,12 +493,20 @@ class HomeWindow(QMainWindow):
                 QMessageBox.critical(self, "Could Not Open Annotation Studio", f"{type(exc).__name__}: {exc}")
 
     def prepare_existing_recording(self):
-        features, _ = QFileDialog.getOpenFileName(self, "Choose the existing feature Parquet", "", "Features (*_features.parquet)")
+        features, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose the existing feature Parquet",
+            self.preferences.values.default_features_directory or "",
+            "Features (*_features.parquet)",
+        )
         if not features:
             return
         path = Path(features)
         suggested = path.parent.parent / "video" / f"{path.stem.removesuffix('_features')}_skeleton.mp4"
-        video, _ = QFileDialog.getOpenFileName(self, "Choose the matching skeleton video", str(suggested), "Video (*.mp4 *.mov *.mkv *.avi)")
+        skeleton_start = self.preferences.values.default_skeleton_directory or str(suggested)
+        video, _ = QFileDialog.getOpenFileName(
+            self, "Choose the matching skeleton video", skeleton_start, "Video (*.mp4 *.mov *.mkv *.avi)"
+        )
         if not video:
             return
         process = QProcess(self)
@@ -439,6 +564,7 @@ class HomeWindow(QMainWindow):
                 parquet_path=first.features_path,
                 metadata_path=first.metadata_path,
                 frame_jump=self.preferences.values.default_frame_jump,
+                preferences=self.preferences,
             )
             if self.annotation_window is not None:
                 self.remember_window(self.annotation_window, first)
@@ -453,6 +579,7 @@ class HomeWindow(QMainWindow):
             self.annotation_window = open_annotation_studio(
                 self,
                 frame_jump=self.preferences.values.default_frame_jump,
+                preferences=self.preferences,
             )
 
             if self.annotation_window is None:
@@ -533,6 +660,7 @@ class HomeWindow(QMainWindow):
                     metadata_path=metadata if metadata and Path(metadata).is_file() else None,
                     annotation_json_path=files.get("annotationJson") or None,
                     frame_jump=viewer.jump_spin.value(),
+                    preferences=self.preferences,
                 )
                 self.annotation_window = window
                 self.remember_window(window)
@@ -698,6 +826,7 @@ class HomeWindow(QMainWindow):
                 metadata_path=metadata if metadata and Path(metadata).is_file() else None,
                 annotation_json_path=files.get("annotationJson") or None,
                 frame_jump=self.preferences.values.default_frame_jump,
+                preferences=self.preferences,
             )
             if self.annotation_window is not None:
                 self.remember_window(self.annotation_window)

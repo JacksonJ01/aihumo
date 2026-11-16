@@ -502,7 +502,9 @@ def test_desktop_viewer_all_graphs_motion_components_and_frame_details(qt_app, t
         qt_app.processEvents()
         assert graph.show_all_sources.isChecked()
         assert len(graph.figure.axes) == 4
-        assert bar.maximum() == 0 and not graph._source_dividers
+        # Source-comparison "Show All" views retain their 2x2 layout and
+        # scroll vertically instead of compressing or clipping the panels.
+        assert bar.maximum() > 0 and not graph._source_dividers
         (_, horizontal, vertical), = graph._panel_dividers
         assert horizontal.get_linewidth() == vertical.get_linewidth() == strong_width
         graph.canvas.draw()

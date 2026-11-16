@@ -15,10 +15,22 @@ import { saveToDataset } from "../../lib/dataset/client";
 const POSE_SCRIPT_ID = "mediapipe-pose-script";
 const POSE_SCRIPT_SRC = "/@mediapipe/pose/pose.js";
 
+type MediaPipeModule = {
+  arguments: string[];
+  onRuntimeInitialized: () => void;
+  preloadedWasm?: Record<string, unknown>;
+};
+
+declare global {
+  interface Window {
+    Module?: MediaPipeModule;
+  }
+}
+
 // Patch Module.arguments before MediaPipe loads to prevent Emscripten WASM errors
 // MediaPipe's WASM binary tries to access deprecated Module.arguments property
-if (typeof window !== "undefined" && typeof (window as any).Module === "undefined") {
-  (window as any).Module = {
+if (typeof window !== "undefined" && typeof window.Module === "undefined") {
+  window.Module = {
     arguments: [],
     onRuntimeInitialized: () => {}
   };
@@ -139,8 +151,8 @@ export default function WorkoutsSession({ canTrainModel = false }: WorkoutsSessi
     let isMounted = true;
 
     // Ensure Module object exists and prevent WASM abort on arguments access
-    if (!(window as any).Module) {
-      (window as any).Module = {
+    if (!window.Module) {
+      window.Module = {
         arguments: [],
         onRuntimeInitialized: () => {},
         preloadedWasm: {}
@@ -149,7 +161,7 @@ export default function WorkoutsSession({ canTrainModel = false }: WorkoutsSessi
 
     // Override arguments property to prevent Emscripten abort
     try {
-      Object.defineProperty((window as any).Module, "arguments", {
+      Object.defineProperty(window.Module, "arguments", {
         value: [],
         writable: true,
         configurable: true,
@@ -465,7 +477,7 @@ export default function WorkoutsSession({ canTrainModel = false }: WorkoutsSessi
       videoEl.removeEventListener("loadedmetadata", handleLoadedMetadata);
       videoEl.removeEventListener("ended", handleEnded);
     };
-  }, [uploadedVideoUrl, isUploadedVideoModeEnabled, clearFrameBuffer]);
+  }, [uploadedVideoUrl, isUploadedVideoModeEnabled, clearFrameBuffer, videoRef]);
 
   // Check if any recording has frames (for Stop & Export button)
   const hasFrames = frameBufferRef.current.length > 0;
