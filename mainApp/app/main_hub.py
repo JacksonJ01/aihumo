@@ -33,6 +33,7 @@ class HubApp:
     description: str
     section: str
     art: str = ""
+    keywords: tuple[str, ...] = ()
     mode: int | None = None
     game_id: str | None = None
     cognitive_game_id: str | None = None
@@ -67,26 +68,31 @@ PIPELINE_APPS = (
         "pipeline", "AIHuMo Pipeline", "Process · Annotate · Analyze",
         "Open the complete AIHuMo Data Studio launcher and choose any processing, annotation, alignment, or graph workflow.",
         "Movement Analysis", art="pipeline.jpg",
+        keywords=("processing", "video", "features", "mediapipe", "skeleton", "workflow", "parquet", "dataset"),
     ),
     HubApp(
         "annotation", "Annotation Studio", "Mode 1 · Layered annotation",
         "Label activities, sets, repetitions, phases, form observations, notes, and synchronized frame context.",
-        "Movement Analysis", art="annotation.jpg", mode=1,
+        "Movement Analysis", art="annotation.jpg",
+        keywords=("labeling", "timeline", "segments", "activity", "sets", "repetitions", "phases", "form"), mode=1,
     ),
     HubApp(
         "alignment", "Session Alignment", "Mode 2 · Multi-camera alignment",
         "Align related recordings and annotations across cameras, trimmed clips, and session timelines.",
-        "Movement Analysis", art="alignment.jpg", mode=2,
+        "Movement Analysis", art="alignment.jpg",
+        keywords=("synchronize", "cameras", "sessions", "offset", "trim", "timeline", "matching", "recordings"), mode=2,
     ),
     HubApp(
         "graph_2d", "Interactive Graph Viewer (2D)", "Mode 3 · Image-plane measurements",
         "Review synchronized skeleton video, 2D joint angles, landmark motion, distances, and annotation overlays.",
-        "Movement Analysis", art="graph_2d.jpg", mode=3,
+        "Movement Analysis", art="graph_2d.jpg",
+        keywords=("angles", "landmarks", "image-plane", "charts", "timeline", "velocity", "measurements", "visualization"), mode=3,
     ),
     HubApp(
         "graph_3d", "Interactive Graph Viewer (3D)", "Mode 4 · Estimated world measurements",
         "Inspect the rotatable pose and synchronized estimated-world timelines alongside the source video.",
-        "Movement Analysis", art="graph_3d.jpg", mode=4,
+        "Movement Analysis", art="graph_3d.jpg",
+        keywords=("world", "spatial", "rotation", "coordinates", "angles", "trajectory", "charts", "visualization"), mode=4,
     ),
 )
 
@@ -95,12 +101,16 @@ COGNITIVE_APPS = (
     HubApp(
         "spelling_bee", "Spelling Bee", "Words · Definitions · Recall",
         "Practice spelling from the AIHuMo dictionary with definitions, difficulty controls, rounds, and score feedback.",
-        "Cognitive Games", art="spelling_bee.jpg", cognitive_game_id="spelling_bee",
+        "Cognitive Games", art="spelling_bee.jpg",
+        keywords=("words", "letters", "vocabulary", "definition", "recall", "language", "bee", "literacy"),
+        cognitive_game_id="spelling_bee",
     ),
     HubApp(
         "math_challenge", "Math Challenge", "Arithmetic · Accuracy · Recall",
         "Solve addition, subtraction, multiplication, and division prompts with adjustable rounds and scoring.",
-        "Cognitive Games", art="math_challenge.jpg", cognitive_game_id="math_challenge",
+        "Cognitive Games", art="math_challenge.jpg",
+        keywords=("arithmetic", "numbers", "addition", "subtraction", "multiplication", "division", "calculation", "recall"),
+        cognitive_game_id="math_challenge",
     ),
 )
 
@@ -117,6 +127,27 @@ GAME_SECTIONS = {
 }
 
 
+GAME_SEARCH_TERMS = {
+    "just_dance": ("dance", "music", "choreography", "beat", "tempo", "rhythm", "timing", "coordination"),
+    "target_grid_6": ("zones", "grid", "targets", "stepping", "reaction", "position", "accuracy", "coordination"),
+    "target_grid_12": ("precision", "zones", "dense", "grid", "target", "accuracy", "footwork", "reaction"),
+    "mirror": ("pose", "symmetry", "imitation", "copy", "bilateral", "form", "alignment", "control"),
+    "path": ("trajectory", "tracing", "route", "smoothness", "hand", "foot", "precision", "coordination"),
+    "reaction": ("reflexes", "speed", "targets", "response", "quickness", "reach", "timing", "coordination"),
+    "freeze": ("pose", "stillness", "hold", "stability", "balance", "posture", "control", "endurance"),
+    "avoid": ("escape", "zones", "avoidance", "safety", "agility", "position", "movement", "reaction"),
+    "rhythm": ("beat", "tempo", "timing", "cadence", "music", "movement", "consistency", "coordination"),
+    "obstacle": ("dodge", "evade", "hazards", "agility", "sidestep", "squat", "reaction", "clearance"),
+    "sequence": ("memory", "order", "colors", "numbers", "recall", "pattern", "cognitive", "zones"),
+    "balance": ("stability", "sway", "center", "posture", "control", "equilibrium", "reach", "coordination"),
+    "partner": ("synchronize", "duo", "matching", "teamwork", "social", "timing", "coordination", "imitation"),
+    "sports": ("athletics", "reflexes", "reach", "stance", "boxing", "tennis", "goalkeeper", "reaction"),
+    "rehab": ("rehabilitation", "therapy", "range", "mobility", "controlled", "recovery", "assessment", "movement"),
+    "ergonomics": ("posture", "lifting", "desk", "workplace", "reaching", "bending", "risk", "assessment"),
+    "gait": ("walking", "stride", "steps", "symmetry", "cadence", "locomotion", "turning", "balance"),
+}
+
+
 def hub_apps() -> tuple[HubApp, ...]:
     games: list[HubApp] = []
     for definition in load_game_definitions():
@@ -128,9 +159,48 @@ def hub_apps() -> tuple[HubApp, ...]:
             f"{definition.description} Objective: {definition.objective}",
             section,
             art=f"{definition.id}.jpg",
+            keywords=GAME_SEARCH_TERMS[definition.id],
             game_id=definition.id,
         ))
     return (*PIPELINE_APPS, *games, *COGNITIVE_APPS)
+
+
+def hub_app_search_rank(app: HubApp, query: str) -> tuple[int, str] | None:
+    """Return a stable relevance rank; secondary matches tie by app title."""
+    query = query.casefold().strip()
+    title = app.title.casefold()
+    subtitle = app.subtitle.casefold()
+    description = app.description.casefold()
+    section = app.section.casefold()
+    keywords = tuple(term.casefold() for term in app.keywords)
+    if not query:
+        return 0, title
+    if title == query:
+        return 0, title
+    if title.startswith(query):
+        return 1, title
+    if query in title:
+        return 2, title
+    if query in subtitle:
+        return 3, title
+    if query in keywords:
+        return 4, title
+    if any(term.startswith(query) for term in keywords):
+        return 5, title
+    if any(query in term for term in keywords):
+        return 6, title
+    if query in description:
+        return 7, title
+    if query in section:
+        return 8, title
+    return None
+
+
+def ranked_hub_apps(apps: tuple[HubApp, ...], query: str) -> tuple[HubApp, ...]:
+    if not query.strip():
+        return tuple(apps)
+    matches = ((rank, app) for app in apps if (rank := hub_app_search_rank(app, query)) is not None)
+    return tuple(app for _, app in sorted(matches, key=lambda item: item[0]))
 
 
 class ThumbnailPlaceholder(QLabel):
@@ -189,6 +259,7 @@ class PerspectiveAppCarousel(QWidget):
         self._animation.setDuration(420)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._animation.valueChanged.connect(self._animation_value_changed)
+        self._animation.finished.connect(self._normalize_position)
         self.setMinimumHeight(330)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -203,7 +274,7 @@ class PerspectiveAppCarousel(QWidget):
     def current_index(self) -> int:
         if not self.apps:
             return -1
-        return int(max(0, min(len(self.apps) - 1, round(self._position))))
+        return int(round(self._position)) % len(self.apps)
 
     @property
     def current_app(self) -> HubApp | None:
@@ -222,7 +293,8 @@ class PerspectiveAppCarousel(QWidget):
             )
         index = next((i for i, app in enumerate(self.apps) if app.id == current_id), 0)
         self._last_emitted_index = -2
-        self.set_current_index(index, animated=False)
+        self._animation.stop()
+        self._set_position(float(index))
 
     def set_current_index(self, index: int, *, animated: bool = True) -> None:
         if not self.apps:
@@ -231,20 +303,22 @@ class PerspectiveAppCarousel(QWidget):
             self.currentIndexChanged.emit(-1)
             self.update()
             return
-        target = int(max(0, min(len(self.apps) - 1, index)))
+        normalized = int(index) % len(self.apps)
+        cycle = round((self._position - normalized) / len(self.apps))
+        target = float(normalized + cycle * len(self.apps))
         self._animation.stop()
         if not animated:
-            self._set_position(float(target))
+            self._set_position(target)
             return
-        self._animation.setStartValue(self._position)
-        self._animation.setEndValue(float(target))
-        self._animation.start()
+        self._animate_to_position(target)
 
     def previous(self) -> None:
-        self.set_current_index(self.current_index - 1)
+        if self.apps:
+            self._animate_to_position(round(self._position) - 1)
 
     def next(self) -> None:
-        self.set_current_index(self.current_index + 1)
+        if self.apps:
+            self._animate_to_position(round(self._position) + 1)
 
     def activate_current(self) -> None:
         if self.current_app is not None:
@@ -253,9 +327,19 @@ class PerspectiveAppCarousel(QWidget):
     def _animation_value_changed(self, value) -> None:
         self._set_position(float(value))
 
+    def _animate_to_position(self, target: float) -> None:
+        self._animation.stop()
+        self._animation.setStartValue(self._position)
+        self._animation.setEndValue(float(target))
+        self._animation.start()
+
+    def _normalize_position(self) -> None:
+        if self.apps:
+            self._position = float(self.current_index)
+            self.update()
+
     def _set_position(self, value: float) -> None:
-        maximum = max(0, len(self.apps) - 1)
-        self._position = max(0.0, min(float(maximum), value))
+        self._position = float(value)
         index = self.current_index
         if index != self._last_emitted_index:
             self._last_emitted_index = index
@@ -355,7 +439,8 @@ class PerspectiveAppCarousel(QWidget):
         card_width, card_height, spacing, center_y = self._metrics()
         items: list[tuple[float, int, QPolygonF, QPixmap]] = []
         for index, app in enumerate(self.apps):
-            offset = index - self._position
+            cycle = round((self._position - index) / len(self.apps))
+            offset = index + cycle * len(self.apps) - self._position
             if abs(offset) > 3.25:
                 continue
             scale = max(0.58, 1.0 - 0.145 * abs(offset))
@@ -495,8 +580,7 @@ class AppDetailCard(QFrame):
         layout.addWidget(self.open_button)
 
     def matches(self, query: str) -> bool:
-        text = f"{self.app.title} {self.app.subtitle} {self.app.description} {self.app.section}".casefold()
-        return not query or query in text
+        return hub_app_search_rank(self.app, query) is not None
 
 
 class AppDetailGrid(QWidget):
@@ -505,6 +589,7 @@ class AppDetailGrid(QWidget):
     def __init__(self, apps: tuple[HubApp, ...], launch: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
         self.cards = [AppDetailCard(app, launch) for app in apps]
+        self._display_cards = list(self.cards)
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 8, 0, 8)
         self.grid.setHorizontalSpacing(16)
@@ -514,13 +599,19 @@ class AppDetailGrid(QWidget):
 
     def filter(self, query: str) -> int:
         query = query.casefold().strip()
-        count = 0
+        ranked_cards: list[tuple[tuple[int, str], AppDetailCard]] = []
         for card in self.cards:
-            card.filter_match = card.matches(query)
+            rank = hub_app_search_rank(card.app, query)
+            card.filter_match = rank is not None
             card.setVisible(card.filter_match)
-            count += int(card.filter_match)
+            if rank is not None:
+                ranked_cards.append((rank, card))
+        self._display_cards = (
+            [card for _, card in sorted(ranked_cards, key=lambda item: item[0])]
+            if query else list(self.cards)
+        )
         self._reflow()
-        return count
+        return len(self._display_cards)
 
     def resizeEvent(self, event):
         self._reflow()
@@ -533,7 +624,7 @@ class AppDetailGrid(QWidget):
     def _reflow(self, columns: int | None = None) -> None:
         if columns is None:
             columns = max(1, min(3, max(1, self.width()) // 370))
-        matches = [card for card in self.cards if card.filter_match]
+        matches = [card for card in self._display_cards if card.filter_match]
         for card in self.cards:
             self.grid.removeWidget(card)
         for index, card in enumerate(matches):
@@ -586,8 +677,7 @@ class CategorySection(QFrame):
         self.header.setAccessibleName(f"{self.title}, {'expanded' if expanded else 'collapsed'}")
 
     def filter(self, query: str, *, auto_expand: bool = False) -> int:
-        description_match = bool(query and query in f"{self.title} {self.description}".casefold())
-        count = self.grid.filter("" if description_match else query)
+        count = self.grid.filter(query)
         self.setVisible(bool(count))
         if auto_expand and query and count:
             self.set_expanded(True)
@@ -843,10 +933,7 @@ class MainHubDialog(QDialog):
 
     def _filter_apps(self, text: str) -> None:
         query = text.casefold().strip()
-        matching_apps = tuple(
-            app for app in self.apps
-            if not query or query in f"{app.title} {app.subtitle} {app.description} {app.section}".casefold()
-        )
+        matching_apps = ranked_hub_apps(self.apps, query)
         self.all_apps_carousel.set_apps(matching_apps)
         for section in self.filterables:
             section.filter(query, auto_expand=section in self.home_sections.values())
@@ -895,6 +982,13 @@ class MainHubDialog(QDialog):
             }
         return f"""
             QDialog, QWidget#hubBody {{ background: {colors['window']}; color: {colors['text']}; font-family: "Segoe UI"; }}
+            QWidget, QLabel, QPushButton, QCheckBox, QRadioButton, QGroupBox, QTabWidget {{ color: {colors['text']}; }}
+            QPushButton {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 9px; padding: 7px 10px; }}
+            QPushButton:hover {{ border-color: {colors['accent']}; }}
+            QPushButton:disabled {{ color: {colors['muted']}; background: {colors['placeholder']}; }}
+            QTabBar::tab {{ color: {colors['muted']}; background: {colors['panel']}; border: 1px solid {colors['border']}; padding: 8px 13px; }}
+            QTabBar::tab:selected {{ color: {colors['text']}; background: {colors['card']}; border-bottom: 2px solid {colors['accent']}; }}
+            QTabBar::tab:hover {{ color: {colors['text']}; border-color: {colors['accent']}; }}
             QFrame#navBar {{ background: {colors['panel']}; border-bottom: 1px solid {colors['border']}; }}
             QLabel {{ color: {colors['text']}; }}
             QLabel#hubBrand {{ font-size: 21px; font-weight: 800; padding-right: 5px; }}
@@ -920,7 +1014,12 @@ class MainHubDialog(QDialog):
             QPushButton#primaryButton:hover {{ background: {colors['accent']}; color: #07152f; }}
             QPushButton#primaryButton:disabled {{ background: {colors['border']}; color: {colors['muted']}; }}
             QPushButton#quietButton {{ color: {colors['text']}; background: transparent; border: 1px solid {colors['border']}; border-radius: 11px; padding: 7px 10px; }}
-            QLineEdit, QComboBox {{ color: {colors['text']}; background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 12px; padding: 7px 10px; }}
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QTableView, QTreeView {{ color: {colors['text']}; background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 12px; padding: 7px 10px; selection-background-color: {colors['accent2']}; selection-color: white; }}
+            QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{ color: {colors['muted']}; background: {colors['placeholder']}; }}
+            QComboBox QAbstractItemView, QMenu {{ color: {colors['text']}; background: {colors['panel']}; border: 1px solid {colors['border']}; selection-background-color: {colors['accent2']}; selection-color: white; outline: none; }}
+            QComboBox QAbstractItemView::item {{ color: {colors['text']}; min-height: 28px; padding: 4px 8px; }}
+            QComboBox QAbstractItemView::item:selected {{ color: white; background: {colors['accent2']}; }}
+            QToolTip {{ color: {colors['text']}; background: {colors['card']}; border: 1px solid {colors['accent']}; padding: 5px; }}
             QScrollArea {{ border: none; background: {colors['window']}; }}
             QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px; }}
             QScrollBar::handle:vertical {{ background: {colors['border']}; min-height: 40px; border-radius: 5px; }}

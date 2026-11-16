@@ -3,7 +3,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import QCheckBox, QLabel, QTabWidget
 
 from app.AIHuMoDataStudio import DesktopApplicationController, HomeWindow, MainHubDialog
-from app.main_hub import PerspectiveAppCarousel, ThumbnailPlaceholder
+from app.main_hub import PerspectiveAppCarousel, ThumbnailPlaceholder, ranked_hub_apps
 from app.movement_games import load_game_definitions
 from app.mode1_annotation import AnnotationDialog
 from app.preferences import DesktopPreferences, PreferenceStore, PreferencesDialog, StartupSetupDialog
@@ -183,6 +183,48 @@ def test_all_apps_carousel_keeps_artwork_and_angles_only_side_cards(qt_app):
         dialog.close()
 
 
+def test_all_apps_carousel_loops_without_changing_visible_count(qt_app):
+    dialog = MainHubDialog()
+    try:
+        carousel = dialog.all_apps_carousel
+        total = len(carousel.apps)
+        carousel.set_current_index(total - 1, animated=False)
+        assert carousel.current_index == total - 1
+        carousel._set_position(float(total))
+        assert carousel.current_index == 0
+        dialog._carousel_index_changed(carousel.current_index)
+        assert dialog.carousel_status.text().startswith(f"1 / {total}")
+        carousel._set_position(-1.0)
+        assert carousel.current_index == total - 1
+        dialog._carousel_index_changed(carousel.current_index)
+        assert dialog.carousel_status.text().startswith(f"{total} / {total}")
+    finally:
+        dialog.close()
+
+
+def test_hub_search_uses_game_keywords_and_relevance_order(qt_app):
+    dialog = MainHubDialog()
+    try:
+        assert all(5 <= len(app.keywords) <= 10 for app in dialog.apps)
+        pose_ids = [app.id for app in ranked_hub_apps(dialog.apps, "pose")]
+        assert pose_ids[:2] == ["freeze", "mirror"]
+        assert "graph_3d" in pose_ids
+        assert pose_ids.index("graph_3d") > pose_ids.index("mirror")
+        assert [app.id for app in ranked_hub_apps(dialog.apps, "dodg")] == ["obstacle"]
+
+        coordination = ranked_hub_apps(dialog.apps, "coordination")
+        rank_groups = {}
+        for app in coordination:
+            rank_groups.setdefault(app.subtitle.casefold() == "coordination", []).append(app.title)
+        assert rank_groups[True] == sorted(rank_groups[True], key=str.casefold)
+
+        dialog.search.setText("pose")
+        qt_app.processEvents()
+        assert [app.id for app in dialog.all_apps_carousel.apps][:2] == ["freeze", "mirror"]
+    finally:
+        dialog.close()
+
+
 def test_every_hub_app_button_launches_without_crashing(qt_app, tmp_path, monkeypatch):
     movement_launches = []
     cognitive_launches = []
@@ -235,6 +277,11 @@ def test_main_hub_supports_light_and_dark_without_galaxy(qt_app, tmp_path):
             qt_app.processEvents()
             loaded = PreferenceStore(tmp_path / "settings.json").values
             assert loaded.theme == theme
+            stylesheet = dialog.styleSheet()
+            assert "QWidget, QLabel, QPushButton, QCheckBox" in stylesheet
+            assert "QTabBar::tab:selected" in stylesheet
+            assert "QComboBox QAbstractItemView::item:selected" in stylesheet
+            assert "QToolTip" in stylesheet
         assert not hasattr(dialog, "galaxy")
         assert not hasattr(dialog, "galaxy_toggle")
     finally:
