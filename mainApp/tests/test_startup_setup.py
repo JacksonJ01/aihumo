@@ -3,7 +3,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import QCheckBox, QLabel, QTabWidget
 
 from app.AIHuMoDataStudio import DesktopApplicationController, HomeWindow, MainHubDialog
-from app.main_hub import ThumbnailPlaceholder
+from app.main_hub import PerspectiveAppCarousel, ThumbnailPlaceholder
 from app.movement_games import load_game_definitions
 from app.mode1_annotation import AnnotationDialog
 from app.preferences import DesktopPreferences, PreferenceStore, PreferencesDialog, StartupSetupDialog
@@ -143,6 +143,43 @@ def test_main_hub_exposes_pipeline_and_justice_dance_entries(qt_app):
         assert artwork
         assert all(item.image_path.is_file() and not item.source.isNull() for item in artwork)
     finally:
+        dialog.close()
+
+
+def test_all_apps_carousel_keeps_artwork_and_angles_only_side_cards(qt_app):
+    launches = []
+    dialog = MainHubDialog()
+    carousel = PerspectiveAppCarousel(dialog.apps, launches.append)
+    try:
+        carousel.resize(1100, 340)
+        carousel.show()
+        qt_app.processEvents()
+        assert len(carousel.apps) == len(dialog.apps)
+        assert all(not carousel._sources[app.id].isNull() for app in carousel.apps)
+
+        center = carousel._quad_for_offset(500, 170, 420, 250, 0)
+        left = carousel._quad_for_offset(300, 170, 350, 210, -1)
+        right = carousel._quad_for_offset(700, 170, 350, 210, 1)
+        edge_height = lambda quad, top, bottom: quad[bottom].y() - quad[top].y()
+        assert edge_height(center, 0, 3) == edge_height(center, 1, 2)
+        assert edge_height(left, 1, 2) > edge_height(left, 0, 3)
+        assert edge_height(right, 0, 3) > edge_height(right, 1, 2)
+
+        carousel.set_current_index(4, animated=False)
+        assert carousel.current_app == dialog.apps[4]
+        carousel.activate_current()
+        assert launches == [dialog.apps[4]]
+        assert not carousel.grab().isNull()
+
+        dialog.search.setText("spelling")
+        qt_app.processEvents()
+        assert [app.id for app in dialog.all_apps_carousel.apps] == ["spelling_bee"]
+        assert "Spelling Bee" in dialog.carousel_status.text()
+        dialog.search.clear()
+        qt_app.processEvents()
+        assert len(dialog.all_apps_carousel.apps) == len(dialog.apps)
+    finally:
+        carousel.close()
         dialog.close()
 
 

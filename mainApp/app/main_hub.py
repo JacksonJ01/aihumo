@@ -6,8 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QVariantAnimation, pyqtSignal
+from PyQt6.QtGui import (
+    QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPixmap, QPolygonF,
+    QTextOption, QTransform,
+)
 from PyQt6.QtWidgets import (
     QButtonGroup, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout,
@@ -159,6 +162,281 @@ class ThumbnailPlaceholder(QLabel):
         x = max(0, (scaled.width() - self.width()) // 2)
         y = max(0, (scaled.height() - self.height()) // 2)
         self.setPixmap(scaled.copy(x, y, self.width(), self.height()))
+
+
+class PerspectiveAppCarousel(QWidget):
+    """Smooth, image-first 2.5D carousel for the complete app catalogue."""
+
+    currentIndexChanged = pyqtSignal(int)
+
+    def __init__(self, apps: tuple[HubApp, ...], launch: Callable[[HubApp], None], parent=None):
+        super().__init__(parent)
+        self.apps = tuple(apps)
+        self.launch = launch
+        self._position = 0.0
+        self._dark = False
+        self._hit_polygons: list[tuple[int, QPolygonF]] = []
+        self._press_point: QPointF | None = None
+        self._press_position = 0.0
+        self._dragged = False
+        self._last_emitted_index = 0
+        self._sources = {
+            app.id: QPixmap(str(HUB_CARD_DIR / app.art)) if app.art else QPixmap()
+            for app in self.apps
+        }
+        self._card_cache: dict[tuple[str, bool, bool], QPixmap] = {}
+        self._animation = QVariantAnimation(self)
+        self._animation.setDuration(420)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._animation.valueChanged.connect(self._animation_value_changed)
+        self.setMinimumHeight(330)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
+        self.setAccessibleName("All Apps perspective carousel")
+        self.setToolTip(
+            "Drag, use the mouse wheel, or press Left and Right. "
+            "Select the centered card again to open it."
+        )
+
+    @property
+    def current_index(self) -> int:
+        if not self.apps:
+            return -1
+        return int(max(0, min(len(self.apps) - 1, round(self._position))))
+
+    @property
+    def current_app(self) -> HubApp | None:
+        return self.apps[self.current_index] if self.current_index >= 0 else None
+
+    def set_dark(self, dark: bool) -> None:
+        self._dark = bool(dark)
+        self.update()
+
+    def set_apps(self, apps: tuple[HubApp, ...]) -> None:
+        current_id = self.current_app.id if self.current_app else None
+        self.apps = tuple(apps)
+        for app in self.apps:
+            self._sources.setdefault(
+                app.id, QPixmap(str(HUB_CARD_DIR / app.art)) if app.art else QPixmap()
+            )
+        index = next((i for i, app in enumerate(self.apps) if app.id == current_id), 0)
+        self._last_emitted_index = -2
+        self.set_current_index(index, animated=False)
+
+    def set_current_index(self, index: int, *, animated: bool = True) -> None:
+        if not self.apps:
+            self._position = 0.0
+            self._last_emitted_index = -1
+            self.currentIndexChanged.emit(-1)
+            self.update()
+            return
+        target = int(max(0, min(len(self.apps) - 1, index)))
+        self._animation.stop()
+        if not animated:
+            self._set_position(float(target))
+            return
+        self._animation.setStartValue(self._position)
+        self._animation.setEndValue(float(target))
+        self._animation.start()
+
+    def previous(self) -> None:
+        self.set_current_index(self.current_index - 1)
+
+    def next(self) -> None:
+        self.set_current_index(self.current_index + 1)
+
+    def activate_current(self) -> None:
+        if self.current_app is not None:
+            self.launch(self.current_app)
+
+    def _animation_value_changed(self, value) -> None:
+        self._set_position(float(value))
+
+    def _set_position(self, value: float) -> None:
+        maximum = max(0, len(self.apps) - 1)
+        self._position = max(0.0, min(float(maximum), value))
+        index = self.current_index
+        if index != self._last_emitted_index:
+            self._last_emitted_index = index
+            self.currentIndexChanged.emit(index)
+        self.update()
+
+    def _metrics(self) -> tuple[float, float, float, float]:
+        card_width = min(470.0, max(310.0, self.width() * 0.39))
+        card_height = card_width * 0.60
+        spacing = min(card_width * 0.63, max(175.0, self.width() * 0.225))
+        center_y = max(card_height / 2 + 24.0, self.height() / 2 - 2.0)
+        return card_width, card_height, spacing, center_y
+
+    @staticmethod
+    def _quad_for_offset(center_x: float, center_y: float, width: float, height: float,
+                         offset: float) -> QPolygonF:
+        depth = min(1.0, abs(offset))
+        inner_inset = height * 0.018 * depth
+        outer_inset = height * 0.145 * depth
+        left = center_x - width / 2
+        right = center_x + width / 2
+        top = center_y - height / 2
+        bottom = center_y + height / 2
+        if offset > 0:
+            return QPolygonF([
+                QPointF(left, top + inner_inset), QPointF(right, top + outer_inset),
+                QPointF(right, bottom - outer_inset), QPointF(left, bottom - inner_inset),
+            ])
+        if offset < 0:
+            return QPolygonF([
+                QPointF(left, top + outer_inset), QPointF(right, top + inner_inset),
+                QPointF(right, bottom - inner_inset), QPointF(left, bottom - outer_inset),
+            ])
+        return QPolygonF([
+            QPointF(left, top), QPointF(right, top), QPointF(right, bottom), QPointF(left, bottom),
+        ])
+
+    def _card_pixmap(self, app: HubApp) -> QPixmap:
+        cache_key = (app.id, self._dark, self.current_app == app)
+        cached = self._card_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        card = QPixmap(720, 432)
+        card.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(card)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(3, 3, 714, 426), 24, 24)
+        painter.setClipPath(path)
+        painter.fillPath(path, QColor("#111d33" if self._dark else "#ffffff"))
+
+        source = self._sources.get(app.id, QPixmap())
+        if not source.isNull():
+            scaled = source.scaled(
+                720, 432, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            crop_x = max(0, (scaled.width() - 720) // 2)
+            crop_y = max(0, (scaled.height() - 432) // 2)
+            painter.drawPixmap(0, 0, scaled.copy(crop_x, crop_y, 720, 432))
+
+        gradient = QLinearGradient(0, 220, 0, 432)
+        gradient.setColorAt(0.0, QColor(4, 10, 25, 0))
+        gradient.setColorAt(0.42, QColor(4, 10, 25, 145))
+        gradient.setColorAt(1.0, QColor(4, 10, 25, 235))
+        painter.fillRect(QRectF(0, 210, 720, 222), gradient)
+
+        painter.setPen(QColor("#ffffff"))
+        title_font = QFont("Segoe UI", 22)
+        title_font.setWeight(QFont.Weight.Bold)
+        painter.setFont(title_font)
+        title_option = QTextOption(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+        title_option.setWrapMode(QTextOption.WrapMode.WordWrap)
+        painter.drawText(QRectF(28, 294, 664, 70), app.title, title_option)
+        painter.setPen(QColor("#c9d8f5"))
+        painter.setFont(QFont("Segoe UI", 12))
+        painter.drawText(
+            QRectF(28, 370, 664, 34), app.subtitle,
+            QTextOption(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+        )
+        painter.setClipping(False)
+        painter.setPen(QColor("#4de1e8" if self.current_app == app else "#627493"))
+        painter.drawRoundedRect(QRectF(3, 3, 714, 426), 24, 24)
+        painter.end()
+        self._card_cache[cache_key] = card
+        return card
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        self._hit_polygons = []
+        if not self.apps:
+            painter.end()
+            return
+        card_width, card_height, spacing, center_y = self._metrics()
+        items: list[tuple[float, int, QPolygonF, QPixmap]] = []
+        for index, app in enumerate(self.apps):
+            offset = index - self._position
+            if abs(offset) > 3.25:
+                continue
+            scale = max(0.58, 1.0 - 0.145 * abs(offset))
+            width = card_width * scale
+            height = card_height * scale
+            center_x = self.width() / 2 + offset * spacing
+            quad = self._quad_for_offset(center_x, center_y, width, height, offset)
+            items.append((abs(offset), index, quad, self._card_pixmap(app)))
+        for _, index, quad, card in sorted(items, reverse=True, key=lambda item: item[0]):
+            source_quad = QPolygonF([
+                QPointF(0, 0), QPointF(card.width(), 0),
+                QPointF(card.width(), card.height()), QPointF(0, card.height()),
+            ])
+            transform = QTransform()
+            if QTransform.quadToQuad(source_quad, quad, transform):
+                painter.save()
+                painter.setTransform(transform, combine=True)
+                painter.drawPixmap(0, 0, card)
+                painter.restore()
+            self._hit_polygons.append((index, quad))
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
+            self._animation.stop()
+            self._press_point = event.position()
+            self._press_position = self._position
+            self._dragged = False
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press_point is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = event.position().x() - self._press_point.x()
+            if abs(delta) >= 4:
+                self._dragged = True
+            spacing = self._metrics()[2]
+            self._set_position(self._press_position - delta / max(1.0, spacing))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._press_point is not None:
+            point = event.position()
+            if self._dragged:
+                self.set_current_index(self.current_index)
+            else:
+                selected = next(
+                    (index for index, polygon in reversed(self._hit_polygons)
+                     if polygon.containsPoint(point, Qt.FillRule.WindingFill)), None,
+                )
+                if selected is not None:
+                    if selected == self.current_index:
+                        self.activate_current()
+                    else:
+                        self.set_current_index(selected)
+            self._press_point = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        self.set_current_index(self.current_index + (1 if delta < 0 else -1))
+        event.accept()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Left:
+            self.previous()
+            event.accept()
+        elif event.key() == Qt.Key.Key_Right:
+            self.next()
+            event.accept()
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.activate_current()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
 
 class RecentAppCard(QFrame):
@@ -425,6 +703,27 @@ class MainHubDialog(QDialog):
         )
         all_apps_intro.setWordWrap(True)
         layout.addWidget(all_apps_intro)
+        self.all_apps_carousel = PerspectiveAppCarousel(self.apps, self._launch_app)
+        self.all_apps_carousel.currentIndexChanged.connect(self._carousel_index_changed)
+        layout.addWidget(self.all_apps_carousel)
+        carousel_controls = QHBoxLayout()
+        self.carousel_previous = QPushButton("← Previous", objectName="quietButton")
+        self.carousel_previous.clicked.connect(self.all_apps_carousel.previous)
+        self.carousel_status = QLabel(objectName="carouselStatus")
+        self.carousel_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.carousel_open = QPushButton("Open selected app", objectName="primaryButton")
+        self.carousel_open.clicked.connect(self.all_apps_carousel.activate_current)
+        self.carousel_next = QPushButton("Next →", objectName="quietButton")
+        self.carousel_next.clicked.connect(self.all_apps_carousel.next)
+        carousel_controls.addWidget(self.carousel_previous)
+        carousel_controls.addStretch(1)
+        carousel_controls.addWidget(self.carousel_status)
+        carousel_controls.addWidget(self.carousel_open)
+        carousel_controls.addStretch(1)
+        carousel_controls.addWidget(self.carousel_next)
+        layout.addLayout(carousel_controls)
+        self._carousel_index_changed(self.all_apps_carousel.current_index)
+        layout.addWidget(QLabel("Browse by category", objectName="sectionTitle"))
         for section in self.NAV_ITEMS[1:]:
             apps = tuple(app for app in self.apps if app.section == section)
             category = CategorySection(section, CATEGORY_DESCRIPTIONS[section], apps, self._launch_app,
@@ -544,8 +843,22 @@ class MainHubDialog(QDialog):
 
     def _filter_apps(self, text: str) -> None:
         query = text.casefold().strip()
+        matching_apps = tuple(
+            app for app in self.apps
+            if not query or query in f"{app.title} {app.subtitle} {app.description} {app.section}".casefold()
+        )
+        self.all_apps_carousel.set_apps(matching_apps)
         for section in self.filterables:
             section.filter(query, auto_expand=section in self.home_sections.values())
+
+    def _carousel_index_changed(self, index: int) -> None:
+        app = self.all_apps_carousel.current_app
+        if app is None:
+            self.carousel_status.setText("No matching apps")
+            self.carousel_open.setEnabled(False)
+            return
+        self.carousel_status.setText(f"{index + 1} / {len(self.all_apps_carousel.apps)}  ·  {app.title}")
+        self.carousel_open.setEnabled(True)
 
     def _visual_option_changed(self, *_args) -> None:
         if not hasattr(self, "theme_combo"):
@@ -563,6 +876,8 @@ class MainHubDialog(QDialog):
         self.theme_combo.setCurrentText(theme)
         self.theme_combo.blockSignals(False)
         self.setStyleSheet(self._stylesheet(theme == "Dark"))
+        if hasattr(self, "all_apps_carousel"):
+            self.all_apps_carousel.set_dark(theme == "Dark")
 
     @staticmethod
     def _stylesheet(dark: bool) -> str:
@@ -586,6 +901,7 @@ class MainHubDialog(QDialog):
             QLabel#heroTitle {{ font-size: 31px; font-weight: 800; padding-top: 8px; }}
             QLabel#heroSubtitle, QLabel#mutedText, QLabel#cardDescription, QLabel#categoryDescription {{ color: {colors['muted']}; font-size: 14px; }}
             QLabel#sectionTitle {{ font-size: 21px; font-weight: 750; padding-top: 8px; }}
+            QLabel#carouselStatus {{ color: {colors['muted']}; font-size: 14px; font-weight: 700; min-width: 220px; }}
             QLabel#cardTitle {{ font-size: 17px; font-weight: 750; }}
             QLabel#categoryChip {{ color: {colors['accent']}; font-weight: 700; }}
             QLabel#footerText {{ color: {colors['muted']}; font-weight: 650; }}
