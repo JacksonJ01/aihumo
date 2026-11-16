@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QCheckBox, QTabWidget
 
-from app.AIHuMoDataStudio import HomeWindow, MainHubDialog
+from app.AIHuMoDataStudio import DesktopApplicationController, HomeWindow, MainHubDialog
 from app.mode1_annotation import AnnotationDialog
 from app.preferences import DesktopPreferences, PreferenceStore, PreferencesDialog, StartupSetupDialog
 
@@ -126,10 +126,37 @@ def test_preferences_dialog_exposes_optimization_pages(qt_app, tmp_path):
 def test_main_hub_exposes_pipeline_and_justice_dance_entries(qt_app):
     dialog = MainHubDialog()
     try:
-        assert dialog.aihumo_button.text() == "AIHuMo Pipeline"
-        assert dialog.justice_dance_button.text() == "Justice Dance"
+        assert dialog.aihumo_button.text().startswith("AIHuMo Pipeline")
+        assert dialog.justice_dance_button.text().startswith("Justice Dance")
+        assert "just_dance" in dialog.game_buttons
+        assert len(dialog.game_buttons) == 17
     finally:
         dialog.close()
+
+
+def test_desktop_controller_starts_at_hub_and_returns_from_pipeline(qt_app, tmp_path):
+    controller = DesktopApplicationController(state_dir=tmp_path / "state", processed_root=tmp_path)
+    controller.show_hub()
+    try:
+        assert controller.hub_window.isVisible()
+        assert controller.pipeline_window is None
+
+        controller.hub_window.aihumo_button.click()
+        qt_app.processEvents()
+        assert controller.pipeline_window is not None
+        assert controller.pipeline_window.isVisible()
+        assert not controller.hub_window.isVisible()
+        assert controller.pipeline_window.windowTitle() == "AIHuMo Data Studio"
+
+        controller.pipeline_window.back_to_hub_button.click()
+        qt_app.processEvents()
+        assert controller.hub_window.isVisible()
+        assert not controller.pipeline_window.isVisible()
+    finally:
+        if controller.pipeline_window is not None:
+            controller.pipeline_window._return_to_hub_callback = None
+            controller.pipeline_window.close()
+        controller.hub_window.close()
 
 
 def test_exercise_variation_is_editable_only_on_set_layer(qt_app):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from PyQt6.QtCore import QProcess, QTimer, Qt, pyqtSignal
@@ -65,25 +66,27 @@ class ModeTile(QPushButton):
 
 
 class MainHubDialog(QDialog):
-    """Small extensible product hub for the AIHuMo launcher.
+    """Primary product hub for the AIHuMo desktop application.
 
-    The hub intentionally does not assume that future tools are installed in
-    the same folder.  Each entry can later receive a configured executable,
-    URL, or Python entry point without changing the launcher layout.
+    All current tools are packaged under ``mainApp`` and share the same
+    processed feature files.  A callback lets the application controller open
+    the AIHuMo pipeline without coupling the hub to the pipeline window.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, open_pipeline: Callable[[], None] | None = None):
         super().__init__(parent)
-        self.setWindowTitle("AIHuMo Hub Page")
-        self.resize(900, 680)
+        self._open_pipeline_callback = open_pipeline
+        self.setWindowTitle("AIHuMo Main Hub")
+        self.resize(1100, 760)
         layout = QVBoxLayout(self)
-        title = QLabel("AIHuMo Hub Page")
-        title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        title = QLabel("AIHuMo Main Hub")
+        title.setStyleSheet("font-size: 28px; font-weight: 700;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
         description = QLabel(
-            "Choose the AIHuMo pipeline, connected tools, or movement games. Every game "
-            "uses the same processed skeleton video and feature Parquet as the analysis modes."
+            "Choose the full AIHuMo processing and annotation pipeline or start a movement game. "
+            "Every workspace is part of this desktop application and reuses the same processed "
+            "skeleton videos and feature Parquet files."
         )
         description.setWordWrap(True)
         description.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -92,10 +95,12 @@ class MainHubDialog(QDialog):
         entries = QGridLayout()
         entries.setHorizontalSpacing(12)
         entries.setVerticalSpacing(12)
-        self.aihumo_button = QPushButton("AIHuMo Pipeline")
-        self.aihumo_button.setToolTip("Return to the AIHuMo Data Studio launcher.")
-        self.aihumo_button.clicked.connect(self.accept)
-        self.justice_dance_button = QPushButton("Justice Dance")
+        self.aihumo_button = QPushButton("AIHuMo Pipeline\nProcess · Annotate · Analyze")
+        self.aihumo_button.setToolTip(
+            "Open Modes 0–5 for video processing, annotation, alignment, graph review, and models."
+        )
+        self.aihumo_button.clicked.connect(self.open_pipeline)
+        self.justice_dance_button = QPushButton("Justice Dance\nDance · Rhythm")
         self.justice_dance_button.setToolTip("Open the shared rhythm movement workspace for Justice Dance.")
         self.justice_dance_button.clicked.connect(lambda: self.open_game("just_dance"))
         for button in (self.aihumo_button, self.justice_dance_button):
@@ -112,20 +117,29 @@ class MainHubDialog(QDialog):
         game_grid = QGridLayout(game_content)
         game_grid.setHorizontalSpacing(10)
         game_grid.setVerticalSpacing(10)
-        self.game_buttons = {}
-        for index, definition in enumerate(load_game_definitions()):
-            button = QPushButton(definition.title)
-            button.setMinimumHeight(58)
+        self.game_buttons = {"just_dance": self.justice_dance_button}
+        game_definitions = [definition for definition in load_game_definitions() if definition.id != "just_dance"]
+        for index, definition in enumerate(game_definitions):
+            button = QPushButton(f"{definition.title}\n{definition.category}")
+            button.setMinimumHeight(68)
             button.setToolTip(f"{definition.description}\nObjective: {definition.objective}")
             button.clicked.connect(lambda checked=False, game_id=definition.id: self.open_game(game_id))
             self.game_buttons[definition.id] = button
             game_grid.addWidget(button, index // 3, index % 3)
         game_scroll.setWidget(game_content)
         layout.addWidget(game_scroll, 1)
-        layout.addStretch(1)
-        close = QPushButton("Close")
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close = QPushButton("Exit AIHuMo")
         close.clicked.connect(self.reject)
-        layout.addWidget(close)
+        footer.addWidget(close)
+        layout.addLayout(footer)
+
+    def open_pipeline(self) -> None:
+        if self._open_pipeline_callback is None:
+            self.accept()
+            return
+        self._open_pipeline_callback()
 
     def _justice_dance_placeholder(self) -> None:
         QMessageBox.information(
@@ -177,9 +191,16 @@ class ProcessingCard(QStackedWidget):
 class HomeWindow(QMainWindow):
     """Launcher for the Data Studio workspaces."""
 
-    def __init__(self, *, state_dir: Path | None = None, processed_root: Path | None = None):
+    def __init__(
+        self,
+        *,
+        state_dir: Path | None = None,
+        processed_root: Path | None = None,
+        return_to_hub: Callable[[], None] | None = None,
+    ):
         super().__init__()
-        self.setWindowTitle("AIHuMo Hub Page")
+        self._return_to_hub_callback = return_to_hub
+        self.setWindowTitle("AIHuMo Data Studio")
         self.resize(960, 690)
         self.annotation_window = None
         self.graph_window = None
@@ -203,16 +224,19 @@ class HomeWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(50, 45, 50, 45)
 
-        title = QLabel("AIHuMo Hub Page")
+        title = QLabel("AIHuMo Data Studio")
         title.setStyleSheet("font-size: 28px; font-weight: 700;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header = QHBoxLayout()
+        self.back_to_hub_button = QPushButton("← Back to Main Hub")
+        self.back_to_hub_button.setToolTip("Return to the game and movement-analysis hub.")
+        self.back_to_hub_button.clicked.connect(self.return_to_hub)
         self.setup_button = QPushButton("Setup…")
         self.setup_button.setToolTip("Run the optional participant and starter-video setup again.")
         self.setup_button.clicked.connect(self.open_startup_setup)
         self.settings_button = QPushButton("⚙ Settings")
         self.settings_button.clicked.connect(self.open_settings)
-        header.addSpacing(self.setup_button.sizeHint().width() + self.settings_button.sizeHint().width())
+        header.addWidget(self.back_to_hub_button)
         header.addWidget(title, 1)
         header.addWidget(self.setup_button)
         header.addWidget(self.settings_button)
@@ -283,16 +307,6 @@ class HomeWindow(QMainWindow):
 
         self.resume_group, self.resume_combo, self.resume_button, self.resume_remove_button = self._resume_controls()
         layout.addWidget(self.resume_group)
-        hub_group = QGroupBox("Hub Page")
-        hub_layout = QHBoxLayout(hub_group)
-        hub_description = QLabel("Open AIHuMo and other connected games or analysis tools from one place.")
-        hub_description.setWordWrap(True)
-        hub_layout.addWidget(hub_description, 1)
-        self.main_hub_button = QPushButton("Open Hub Page")
-        self.main_hub_button.setToolTip("Choose AIHuMo Pipeline, Justice Dance, or a movement game.")
-        self.main_hub_button.clicked.connect(self.open_main_hub)
-        hub_layout.addWidget(self.main_hub_button)
-        layout.addWidget(hub_group)
         self._select_mode(self._selected_mode)
         if self._using_default_state and not self.preferences.values.setup_completed:
             QTimer.singleShot(0, self.open_startup_setup)
@@ -403,10 +417,20 @@ class HomeWindow(QMainWindow):
             self._apply_launcher_accent()
 
     def open_main_hub(self):
+        if self._return_to_hub_callback is not None:
+            self.return_to_hub()
+            return
         dialog = MainHubDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.raise_()
             self.activateWindow()
+
+    def return_to_hub(self):
+        if self._return_to_hub_callback is None:
+            self.open_main_hub()
+            return
+        self.hide()
+        self._return_to_hub_callback()
 
     def open_startup_setup(self):
         dialog = StartupSetupDialog(self.preferences, self)
@@ -850,14 +874,45 @@ class HomeWindow(QMainWindow):
             self.graph_window.close()
         super().closeEvent(event)
 
+        if event.isAccepted() and self._return_to_hub_callback is not None:
+            QTimer.singleShot(0, self._return_to_hub_callback)
+
+
+class DesktopApplicationController:
+    """Own the primary Hub and lazily-created AIHuMo pipeline window."""
+
+    def __init__(self, *, state_dir: Path | None = None, processed_root: Path | None = None):
+        self.state_dir = state_dir
+        self.processed_root = processed_root
+        self.pipeline_window: HomeWindow | None = None
+        self.hub_window = MainHubDialog(open_pipeline=self.show_pipeline)
+
+    def show_hub(self) -> None:
+        if self.pipeline_window is not None:
+            self.pipeline_window.hide()
+        self.hub_window.showMaximized()
+        self.hub_window.raise_()
+        self.hub_window.activateWindow()
+
+    def show_pipeline(self) -> None:
+        if self.pipeline_window is None:
+            self.pipeline_window = HomeWindow(
+                state_dir=self.state_dir,
+                processed_root=self.processed_root,
+                return_to_hub=self.show_hub,
+            )
+        self.hub_window.hide()
+        self.pipeline_window.showMaximized()
+        self.pipeline_window.raise_()
+        self.pipeline_window.activateWindow()
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("AIHuMo Data Studio")
-    window = HomeWindow()
-    # Use the desktop's native maximized state so the launcher and any
-    # restored annotation window fit the active monitor without hard-coded
-    # pixel geometry or a second layout jump after the first click.
-    window.showMaximized()
+    controller = DesktopApplicationController()
+    # The Main Hub is the stable first screen. The pipeline is created only
+    # when selected, so its setup and resume state do not appear over games.
+    controller.show_hub()
     return app.exec()
 
 

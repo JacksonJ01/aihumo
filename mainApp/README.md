@@ -16,6 +16,11 @@ Launch the source application only through the canonical root entry point:
 
 Files inside `app/` are package modules and should not be run directly.
 
+The application now opens on the **AIHuMo Main Hub**. Choose **AIHuMo
+Pipeline** to enter Modes 0–5, or launch Justice Dance and the movement games
+directly from their labeled Hub tiles. The pipeline's **Back to Main Hub**
+button returns to the same Hub without opening another application window.
+
 ## Version 0.4 architecture
 
 ```text
