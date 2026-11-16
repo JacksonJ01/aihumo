@@ -132,6 +132,8 @@ def test_main_hub_exposes_pipeline_and_justice_dance_entries(qt_app):
         assert dialog.justice_dance_button.text().startswith("Justice Dance")
         assert "just_dance" in dialog.game_buttons
         assert len(dialog.game_buttons) == 17
+        assert not dialog.aihumo_button.icon().isNull()
+        assert all(not bubble.artwork.isNull() for bubble in dialog.galaxy.bubbles)
     finally:
         dialog.close()
 

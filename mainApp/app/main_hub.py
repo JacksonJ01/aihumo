@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt
-from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -30,6 +31,13 @@ from .movement_games import MovementGameDialog, load_game_definitions
 from .preferences import PreferenceStore, PreferencesDialog
 
 
+ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "hub_cards"
+
+
+def hub_art_path(filename: str) -> Path:
+    return ASSET_DIR / filename
+
+
 @dataclass(frozen=True)
 class HubApp:
     id: str
@@ -37,17 +45,18 @@ class HubApp:
     subtitle: str
     section: str
     accent: str
+    art: str = "processing.jpg"
     mode: int | None = None
     game_id: str | None = None
     featured: bool = False
 
 
 PIPELINE_APPS = (
-    HubApp("pipeline", "AIHuMo Pipeline", "Process · Annotate · Analyze", "Movement Analysis", "#2dc7e8", featured=True),
-    HubApp("annotation", "Annotation Studio", "Layered movement labels", "Movement Analysis", "#8a6df1", mode=1),
-    HubApp("alignment", "Session Alignment", "Multi-camera synchronization", "Movement Analysis", "#5a8dee", mode=2),
-    HubApp("graph_2d", "Graph Viewer 2D", "Angles · Motion · Timelines", "Movement Analysis", "#28c8a2", mode=3, featured=True),
-    HubApp("graph_3d", "Graph Viewer 3D", "Pose space · 3D review", "Movement Analysis", "#e58c55", mode=4),
+    HubApp("pipeline", "AIHuMo Pipeline", "Process · Annotate · Analyze", "Movement Analysis", "#2dc7e8", "processing.jpg", featured=True),
+    HubApp("annotation", "Annotation Studio", "Layered movement labels", "Movement Analysis", "#8a6df1", "annotation.jpg", mode=1),
+    HubApp("alignment", "Session Alignment", "Multi-camera synchronization", "Movement Analysis", "#5a8dee", "partner-sync.jpg", mode=2),
+    HubApp("graph_2d", "Graph Viewer 2D", "Angles · Motion · Timelines", "Movement Analysis", "#28c8a2", "graphs-3d.jpg", mode=3, featured=True),
+    HubApp("graph_3d", "Graph Viewer 3D", "Pose space · 3D review", "Movement Analysis", "#e58c55", "graphs-3d.jpg", mode=4),
 )
 
 
@@ -55,6 +64,19 @@ GAME_ACCENTS = (
     "#ef6f6c", "#9b72f2", "#21c7d9", "#58c98b", "#e6a14a", "#d95fa5",
     "#4f8fea", "#62c26f", "#ef8354", "#7b6de5", "#35b7a5", "#d977c7",
 )
+
+GAME_ART = {
+    "just_dance": "dance-rhythm.jpg",
+    "rhythm": "dance-rhythm.jpg",
+    "mirror": "partner-sync.jpg",
+    "partner": "partner-sync.jpg",
+    "path": "balance-rehab.jpg",
+    "freeze": "balance-rehab.jpg",
+    "balance": "balance-rehab.jpg",
+    "rehab": "balance-rehab.jpg",
+    "ergonomics": "balance-rehab.jpg",
+    "gait": "balance-rehab.jpg",
+}
 
 
 def hub_apps() -> tuple[HubApp, ...]:
@@ -69,6 +91,7 @@ def hub_apps() -> tuple[HubApp, ...]:
             f"{definition.category} · {definition.objective}",
             section,
             GAME_ACCENTS[index % len(GAME_ACCENTS)],
+            art=GAME_ART.get(definition.id, "targets-agility.jpg"),
             game_id=definition.id,
             featured=definition.id in featured_ids,
         ))
@@ -106,6 +129,26 @@ class SkeletonPreview(QWidget):
             painter.drawEllipse(point, 4, 4)
 
 
+class ArtworkPreview(QLabel):
+    """Fast, cropped preview of a Hub artwork asset."""
+
+    def __init__(self, art: str, accent: str, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(150, 78)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        source = QPixmap(str(hub_art_path(art)))
+        if source.isNull():
+            self.setText("●")
+            self.setStyleSheet(f"background: #111827; color: {accent}; border-radius: 12px; font-size: 34px;")
+            return
+        scaled = source.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                               Qt.TransformationMode.SmoothTransformation)
+        x = max(0, (scaled.width() - self.width()) // 2)
+        y = max(0, (scaled.height() - self.height()) // 2)
+        self.setPixmap(scaled.copy(x, y, self.width(), self.height()))
+        self.setStyleSheet("border-radius: 12px;")
+
+
 class RecentCard(QFrame):
     def __init__(self, record: dict, resume: Callable[[], None], dark: bool, parent=None):
         super().__init__(parent)
@@ -113,7 +156,7 @@ class RecentCard(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(16)
-        layout.addWidget(SkeletonPreview(record["accent"]))
+        layout.addWidget(ArtworkPreview(record["art"], record["accent"]))
         details = QVBoxLayout()
         title = QLabel(record["title"])
         title.setObjectName("recentTitle")
@@ -136,20 +179,27 @@ class RecentCard(QFrame):
         layout.addWidget(button)
 
 
-class AppCard(QPushButton):
+class AppCard(QToolButton):
     def __init__(self, app: HubApp, launch: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
         self.app = app
         self.setObjectName("appCard")
-        self.setText(f"{app.title}\n{app.subtitle}")
-        self.setToolTip(app.subtitle)
-        self.setMinimumHeight(108)
+        self.setText(f"{app.title}\n{app.section}")
+        self.setToolTip(f"{app.subtitle}\nClick to open {app.title}.")
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.setIcon(QIcon(str(hub_art_path(app.art))))
+        self.setIconSize(QSize(148, 148))
+        self.setMinimumHeight(218)
         # Ignore long subtitle size hints so the responsive grid can contract
         # without creating a horizontal page scrollbar.
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.setStyleSheet(f"QPushButton#appCard {{ border-left: 6px solid {app.accent}; }}")
         self.clicked.connect(lambda: launch(app))
+
+    def resizeEvent(self, event):
+        side = max(112, min(154, self.width() - 34))
+        self.setIconSize(QSize(side, side))
+        super().resizeEvent(event)
 
 
 class AppGrid(QWidget):
@@ -182,13 +232,44 @@ class BubbleButton(QPushButton):
         self.setToolTip(app.subtitle)
         self.setFixedSize(diameter, diameter)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(f"{app.title}. {app.subtitle}")
+        self.artwork = QPixmap(str(hub_art_path(app.art)))
         self.clicked.connect(lambda: launch(app))
+        self.setText("")
+        self.setIcon(self._circular_icon())
+        self.setIconSize(QSize(diameter - 12, diameter - 12))
         self.setStyleSheet(
-            f"QPushButton {{ background: {app.accent}; color: white; border: 3px solid rgba(255,255,255,150); "
-            f"border-radius: {diameter // 2}px; font-weight: 700; padding: 8px; }}"
+            f"QPushButton {{ background: {app.accent}; border: 3px solid rgba(255,255,255,175); "
+            f"border-radius: {diameter // 2}px; }}"
             "QPushButton:hover { border: 5px solid white; }"
             "QPushButton:focus { border: 5px solid #ffe66d; }"
         )
+        self.caption = QLabel(app.title, self)
+        self.caption.setWordWrap(True)
+        self.caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.caption.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.caption.setStyleSheet(
+            "color: white; background: rgba(4, 12, 30, 175); border-radius: 9px; "
+            "font-family: 'Segoe UI'; font-weight: 700; padding: 4px;"
+        )
+        self.caption.setGeometry(12, int(diameter * 0.57), diameter - 24, int(diameter * 0.30))
+
+    def _circular_icon(self) -> QIcon:
+        side = self.diameter - 12
+        canvas = QPixmap(side, side)
+        canvas.fill(Qt.GlobalColor.transparent)
+        if self.artwork.isNull():
+            return QIcon(canvas)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        clip = QPainterPath()
+        clip.addEllipse(0.0, 0.0, float(side), float(side))
+        painter.setClipPath(clip)
+        scaled = self.artwork.scaled(canvas.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                     Qt.TransformationMode.SmoothTransformation)
+        painter.drawPixmap((side - scaled.width()) // 2, (side - scaled.height()) // 2, scaled)
+        painter.end()
+        return QIcon(canvas)
 
 
 class GalaxyWidget(QWidget):
@@ -419,14 +500,14 @@ class MainHubDialog(QDialog):
 
     def _recent_records(self) -> list[dict]:
         stores = (
-            (0, "AIHuMo Processing", "recent_processing.json", "#2dc7e8"),
-            (1, "Annotation Studio", "recent_work.json", "#8a6df1"),
-            (2, "Session Alignment", "recent_alignments.json", "#5a8dee"),
-            (3, "Graph Viewer 2D", "recent_graphs.json", "#28c8a2"),
-            (4, "Graph Viewer 3D", "recent_poses.json", "#e58c55"),
+            (0, "AIHuMo Processing", "recent_processing.json", "#2dc7e8", "processing.jpg"),
+            (1, "Annotation Studio", "recent_work.json", "#8a6df1", "annotation.jpg"),
+            (2, "Session Alignment", "recent_alignments.json", "#5a8dee", "partner-sync.jpg"),
+            (3, "Graph Viewer 2D", "recent_graphs.json", "#28c8a2", "graphs-3d.jpg"),
+            (4, "Graph Viewer 3D", "recent_poses.json", "#e58c55", "graphs-3d.jpg"),
         )
         records = []
-        for mode, title, filename, accent in stores:
+        for mode, title, filename, accent, art in stores:
             path = self.state_dir / filename
             if not path.is_file():
                 continue
@@ -444,7 +525,7 @@ class MainHubDialog(QDialog):
                     "mode": mode, "title": title, "file": Path(str(preferred)).name,
                     "detail": item.get("name", "Recent AIHuMo workspace"),
                     "status": f"Frame {item.get('lastFrame', 0):,}" if item.get("lastFrame") is not None else "Ready",
-                    "accent": accent, "mtime": path.stat().st_mtime,
+                    "accent": accent, "art": art, "mtime": path.stat().st_mtime,
                 })
             except (OSError, ValueError, TypeError):
                 continue
@@ -533,8 +614,8 @@ class MainHubDialog(QDialog):
             QPushButton#navButton {{ color: {colors['muted']}; background: transparent; border: none; border-radius: 17px; padding: 8px 14px; font-weight: 650; }}
             QPushButton#navButton:hover {{ color: {colors['text']}; background: {colors['window']}; }}
             QPushButton#navButton:checked {{ color: #07152f; background: {colors['accent']}; }}
-            QPushButton#appCard {{ color: {colors['text']}; background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 15px; padding: 15px; text-align: left; font-weight: 650; }}
-            QPushButton#appCard:hover {{ border: 2px solid {colors['accent']}; background: {colors['panel']}; }}
+            QToolButton#appCard {{ color: {colors['text']}; background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 15px; padding: 10px; font-weight: 700; }}
+            QToolButton#appCard:hover {{ border: 2px solid {colors['accent']}; background: {colors['panel']}; }}
             QPushButton#primaryButton {{ color: white; background: {colors['accent2']}; border: none; border-radius: 15px; padding: 9px 18px; font-weight: 700; }}
             QPushButton#primaryButton:hover {{ background: {colors['accent']}; color: #07152f; }}
             QPushButton#quietButton, QPushButton#iconButton {{ color: {colors['text']}; background: transparent; border: 1px solid {colors['border']}; border-radius: 12px; padding: 7px 11px; }}
