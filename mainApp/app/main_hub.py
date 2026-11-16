@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from aihumo.storage import load_json
+from .cognitive_games import CognitiveGameDialog
 from .movement_games import MovementGameDialog, load_game_definitions
 from .preferences import PreferenceStore, PreferencesDialog
 
@@ -49,6 +50,7 @@ class HubApp:
     art: str = "processing.jpg"
     mode: int | None = None
     game_id: str | None = None
+    cognitive_game_id: str | None = None
     featured: bool = False
 
 
@@ -79,6 +81,17 @@ GAME_ART = {
     "gait": "balance-rehab.jpg",
 }
 
+COGNITIVE_APPS = (
+    HubApp(
+        "spelling_bee", "Spelling Bee", "Words · Definitions · Recall", "Cognitive Games",
+        "#d95fa5", "dance-rhythm.jpg", cognitive_game_id="spelling_bee", featured=True,
+    ),
+    HubApp(
+        "math_challenge", "Math Challenge", "Addition · Subtraction · Multiplication · Division", "Cognitive Games",
+        "#e6a14a", "targets-agility.jpg", cognitive_game_id="math_challenge", featured=True,
+    ),
+)
+
 
 def hub_apps() -> tuple[HubApp, ...]:
     games: list[HubApp] = []
@@ -96,7 +109,7 @@ def hub_apps() -> tuple[HubApp, ...]:
             game_id=definition.id,
             featured=definition.id in featured_ids,
         ))
-    return (*PIPELINE_APPS, *games)
+    return (*PIPELINE_APPS, *games, *COGNITIVE_APPS)
 
 
 class SkeletonPreview(QWidget):
@@ -398,7 +411,7 @@ class GalaxyWidget(QWidget):
 class MainHubDialog(QDialog):
     """Persistent Main Hub with fixed navigation and four visual combinations."""
 
-    NAV_ITEMS = ("Home", "Movement Analysis", "Games", "Training & Rehab")
+    NAV_ITEMS = ("Home", "Movement Analysis", "Games", "Training & Rehab", "Cognitive Games")
 
     def __init__(
         self,
@@ -533,6 +546,7 @@ class MainHubDialog(QDialog):
             "Movement Analysis": "Process recordings, annotate movement, align cameras, and inspect synchronized graphs.",
             "Games": "Reaction, rhythm, coordination, social, and movement-play experiences.",
             "Training & Rehab": "Controlled balance, mobility, rehabilitation, gait, and ergonomic workspaces.",
+            "Cognitive Games": "Standalone spelling and mathematics games that do not require a video or pose features.",
         }[section]
         description_label = QLabel(description, objectName="categoryDescription")
         description_label.setWordWrap(True)
@@ -583,6 +597,9 @@ class MainHubDialog(QDialog):
         return sorted(records, key=lambda record: record["mtime"], reverse=True)[:3]
 
     def _launch_app(self, app: HubApp) -> None:
+        if app.cognitive_game_id:
+            CognitiveGameDialog(app.cognitive_game_id, self).exec()
+            return
         if app.game_id:
             MovementGameDialog(app.game_id, self).exec()
             return
