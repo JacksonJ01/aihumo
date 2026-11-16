@@ -49,6 +49,7 @@ class DesktopPreferences:
     autosave_interval_s: int = 30
     interface_scale: float = 1.0
     theme: str = "System"
+    hub_galaxy_mode: bool = False
     arrow_keys_navigate: bool = True
     loop_selected_interval: bool = False
     pause_at_annotation_boundary: bool = False
@@ -132,6 +133,7 @@ class PreferenceStore:
                 autosave_interval_s=bounded_number("autosave_interval_s", 30, 0, 3600, integer=True),
                 interface_scale=bounded_number("interface_scale", 1.0, 0.75, 2.0),
                 theme=text("theme", "System") if text("theme", "System") in {"System", "Light", "Dark", "High contrast"} else "System",
+                hub_galaxy_mode=flag("hub_galaxy_mode", False),
                 arrow_keys_navigate=flag("arrow_keys_navigate", True),
                 loop_selected_interval=flag("loop_selected_interval", False),
                 pause_at_annotation_boundary=flag("pause_at_annotation_boundary", False),
@@ -432,6 +434,7 @@ class PreferencesDialog(QDialog):
         self.autosave_interval_s = QSpinBox(); self.autosave_interval_s.setRange(0, 3600); self.autosave_interval_s.setValue(store.values.autosave_interval_s); self.autosave_interval_s.setSuffix(" s")
         self.interface_scale = QDoubleSpinBox(); self.interface_scale.setRange(0.75, 2.0); self.interface_scale.setSingleStep(0.05); self.interface_scale.setValue(store.values.interface_scale); self.interface_scale.setSuffix("×")
         self.theme = QComboBox(); self.theme.addItems(("System", "Light", "Dark", "High contrast")); self.theme.setCurrentText(store.values.theme)
+        self.hub_galaxy_mode = QCheckBox("Use the App Galaxy on the Main Hub"); self.hub_galaxy_mode.setChecked(store.values.hub_galaxy_mode)
         playback_form.addRow("Default camera name", self.default_camera_name)
         playback_form.addRow("Default viewpoint", self.default_viewpoint)
         playback_form.addRow("Default playback speed", self.default_playback_speed)
@@ -439,6 +442,7 @@ class PreferencesDialog(QDialog):
         playback_form.addRow("Autosave interval", self.autosave_interval_s)
         playback_form.addRow("Interface scale", self.interface_scale)
         playback_form.addRow("Theme", self.theme)
+        playback_form.addRow(self.hub_galaxy_mode)
 
         visualization = QWidget(); tabs.addTab(visualization, "Visualization")
         visualization_form = QFormLayout(visualization)
@@ -568,6 +572,7 @@ class PreferencesDialog(QDialog):
             autosave_interval_s=self.autosave_interval_s.value(),
             interface_scale=self.interface_scale.value(),
             theme=self.theme.currentText(),
+            hub_galaxy_mode=self.hub_galaxy_mode.isChecked(),
             arrow_keys_navigate=self.arrow_keys_navigate.isChecked(),
             loop_selected_interval=self.loop_selected_interval.isChecked(),
             pause_at_annotation_boundary=self.pause_at_annotation_boundary.isChecked(),

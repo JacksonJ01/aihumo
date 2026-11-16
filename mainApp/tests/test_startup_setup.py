@@ -84,6 +84,7 @@ def test_extended_preferences_round_trip_and_bounds(tmp_path):
         default_playback_speed=5.0,
         autosave_interval_s=45,
         theme="Dark",
+        hub_galaxy_mode=True,
         confidence_threshold=0.8,
         smoothing_method="Savitzky-Golay",
         default_annotation_layer="set",
@@ -96,6 +97,7 @@ def test_extended_preferences_round_trip_and_bounds(tmp_path):
     assert loaded.default_playback_speed == 5.0
     assert loaded.autosave_interval_s == 45
     assert loaded.theme == "Dark"
+    assert loaded.hub_galaxy_mode is True
     assert loaded.confidence_threshold == 0.8
     assert loaded.smoothing_method == "Savitzky-Golay"
     assert loaded.default_annotation_layer == "set"
@@ -130,6 +132,47 @@ def test_main_hub_exposes_pipeline_and_justice_dance_entries(qt_app):
         assert dialog.justice_dance_button.text().startswith("Justice Dance")
         assert "just_dance" in dialog.game_buttons
         assert len(dialog.game_buttons) == 17
+    finally:
+        dialog.close()
+
+
+def test_main_hub_supports_all_four_visual_combinations(qt_app, tmp_path):
+    store = PreferenceStore(tmp_path / "settings.json")
+    dialog = MainHubDialog(state_dir=tmp_path, preferences=store)
+    try:
+        for theme, galaxy, expected_index in (
+            ("Light", False, 0),
+            ("Dark", False, 0),
+            ("Light", True, 1),
+            ("Dark", True, 1),
+        ):
+            dialog.theme_combo.setCurrentText(theme)
+            dialog.galaxy_toggle.setChecked(galaxy)
+            # The first Light/standard combination can already be the visual
+            # state mapped from a legacy "System" preference, so exercise the
+            # same save path even when QComboBox has no index change to emit.
+            dialog._visual_option_changed()
+            qt_app.processEvents()
+            assert dialog.all_apps_stack.currentIndex() == expected_index
+            assert dialog.galaxy.dark is (theme == "Dark")
+            loaded = PreferenceStore(tmp_path / "settings.json").values
+            assert loaded.theme == theme
+            assert loaded.hub_galaxy_mode is galaxy
+    finally:
+        dialog.close()
+
+
+def test_galaxy_apps_are_arranged_without_overlap(qt_app, tmp_path):
+    store = PreferenceStore(tmp_path / "settings.json")
+    store.save(DesktopPreferences(theme="Dark", hub_galaxy_mode=True))
+    dialog = MainHubDialog(state_dir=tmp_path, preferences=store)
+    try:
+        dialog.resize(1200, 800)
+        dialog.show()
+        qt_app.processEvents()
+        positions = {(bubble.x(), bubble.y()) for bubble in dialog.galaxy.bubbles}
+        assert len(positions) == len(dialog.galaxy.bubbles)
+        assert not dialog.home_scroll.horizontalScrollBar().isVisible()
     finally:
         dialog.close()
 

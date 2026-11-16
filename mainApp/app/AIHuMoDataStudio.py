@@ -32,7 +32,7 @@ from .pose_viewer import PoseGraphViewer
 from .preferences import PreferencesDialog, PreferenceStore, StartupSetupDialog
 from .quality_review import QualityReviewDialog
 from .processing_resume import processing_fields
-from .movement_games import MovementGameDialog, load_game_definitions
+from .main_hub import MainHubDialog
 from aihumo.recent_work import RecentWorkStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -63,95 +63,6 @@ class ModeTile(QPushButton):
                 self.open_requested.emit()
         else:
             super().keyPressEvent(event)
-
-
-class MainHubDialog(QDialog):
-    """Primary product hub for the AIHuMo desktop application.
-
-    All current tools are packaged under ``mainApp`` and share the same
-    processed feature files.  A callback lets the application controller open
-    the AIHuMo pipeline without coupling the hub to the pipeline window.
-    """
-
-    def __init__(self, parent=None, *, open_pipeline: Callable[[], None] | None = None):
-        super().__init__(parent)
-        self._open_pipeline_callback = open_pipeline
-        self.setWindowTitle("AIHuMo Main Hub")
-        self.resize(1100, 760)
-        layout = QVBoxLayout(self)
-        title = QLabel("AIHuMo Main Hub")
-        title.setStyleSheet("font-size: 28px; font-weight: 700;")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
-        description = QLabel(
-            "Choose the full AIHuMo processing and annotation pipeline or start a movement game. "
-            "Every workspace is part of this desktop application and reuses the same processed "
-            "skeleton videos and feature Parquet files."
-        )
-        description.setWordWrap(True)
-        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(description)
-
-        entries = QGridLayout()
-        entries.setHorizontalSpacing(12)
-        entries.setVerticalSpacing(12)
-        self.aihumo_button = QPushButton("AIHuMo Pipeline\nProcess · Annotate · Analyze")
-        self.aihumo_button.setToolTip(
-            "Open Modes 0–5 for video processing, annotation, alignment, graph review, and models."
-        )
-        self.aihumo_button.clicked.connect(self.open_pipeline)
-        self.justice_dance_button = QPushButton("Justice Dance\nDance · Rhythm")
-        self.justice_dance_button.setToolTip("Open the shared rhythm movement workspace for Justice Dance.")
-        self.justice_dance_button.clicked.connect(lambda: self.open_game("just_dance"))
-        for button in (self.aihumo_button, self.justice_dance_button):
-            button.setMinimumHeight(70)
-            entries.addWidget(button, 0, 0 if button is self.aihumo_button else 1)
-        layout.addLayout(entries)
-        movement_title = QLabel("Movement Games and Analysis")
-        movement_title.setStyleSheet("font-size: 16px; font-weight: 700;")
-        layout.addWidget(movement_title)
-        game_scroll = QScrollArea()
-        game_scroll.setWidgetResizable(True)
-        game_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        game_content = QWidget()
-        game_grid = QGridLayout(game_content)
-        game_grid.setHorizontalSpacing(10)
-        game_grid.setVerticalSpacing(10)
-        self.game_buttons = {"just_dance": self.justice_dance_button}
-        game_definitions = [definition for definition in load_game_definitions() if definition.id != "just_dance"]
-        for index, definition in enumerate(game_definitions):
-            button = QPushButton(f"{definition.title}\n{definition.category}")
-            button.setMinimumHeight(68)
-            button.setToolTip(f"{definition.description}\nObjective: {definition.objective}")
-            button.clicked.connect(lambda checked=False, game_id=definition.id: self.open_game(game_id))
-            self.game_buttons[definition.id] = button
-            game_grid.addWidget(button, index // 3, index % 3)
-        game_scroll.setWidget(game_content)
-        layout.addWidget(game_scroll, 1)
-        footer = QHBoxLayout()
-        footer.addStretch(1)
-        close = QPushButton("Exit AIHuMo")
-        close.clicked.connect(self.reject)
-        footer.addWidget(close)
-        layout.addLayout(footer)
-
-    def open_pipeline(self) -> None:
-        if self._open_pipeline_callback is None:
-            self.accept()
-            return
-        self._open_pipeline_callback()
-
-    def _justice_dance_placeholder(self) -> None:
-        QMessageBox.information(
-            self,
-            "Justice Dance",
-            "The Justice Dance entry is ready in the Main Hub. Its application target "
-            "can be connected when the Justice Dance project is added to this computer.",
-        )
-
-    def open_game(self, game_id: str) -> None:
-        """Open a game while keeping the Hub Page available behind it."""
-        MovementGameDialog(game_id, self).exec()
 
 
 class ProcessingCard(QStackedWidget):
@@ -882,10 +793,17 @@ class DesktopApplicationController:
     """Own the primary Hub and lazily-created AIHuMo pipeline window."""
 
     def __init__(self, *, state_dir: Path | None = None, processed_root: Path | None = None):
-        self.state_dir = state_dir
+        self.state_dir = state_dir if state_dir is not None else PROJECT_ROOT / ".aihumo"
         self.processed_root = processed_root
         self.pipeline_window: HomeWindow | None = None
-        self.hub_window = MainHubDialog(open_pipeline=self.show_pipeline)
+        self.preferences = PreferenceStore(self.state_dir / "settings.json")
+        self.hub_window = MainHubDialog(
+            open_pipeline=self.show_pipeline,
+            open_pipeline_mode=self.show_pipeline_mode,
+            resume_mode=self.resume_mode,
+            state_dir=self.state_dir,
+            preferences=self.preferences,
+        )
 
     def show_hub(self) -> None:
         if self.pipeline_window is not None:
@@ -905,6 +823,18 @@ class DesktopApplicationController:
         self.pipeline_window.showMaximized()
         self.pipeline_window.raise_()
         self.pipeline_window.activateWindow()
+
+    def show_pipeline_mode(self, mode: int) -> None:
+        """Open the pipeline with the requested workspace selected."""
+        self.show_pipeline()
+        if self.pipeline_window is not None:
+            self.pipeline_window._select_mode(mode)
+
+    def resume_mode(self, mode: int) -> None:
+        """Resume the newest workspace for a Hub recent-work card."""
+        self.show_pipeline_mode(mode)
+        if self.pipeline_window is not None:
+            QTimer.singleShot(0, self.pipeline_window.resume_current_work)
 
 def main():
     app = QApplication(sys.argv)
