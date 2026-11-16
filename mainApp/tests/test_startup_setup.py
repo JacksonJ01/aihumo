@@ -1,8 +1,6 @@
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFontMetrics
-from PyQt6.QtWidgets import QCheckBox, QTabWidget
+from PyQt6.QtWidgets import QCheckBox, QLabel, QTabWidget
 
 from app.AIHuMoDataStudio import DesktopApplicationController, HomeWindow, MainHubDialog
 from app.mode1_annotation import AnnotationDialog
@@ -125,6 +123,7 @@ def test_preferences_dialog_exposes_optimization_pages(qt_app, tmp_path):
         checkbox.text() == "Update context automatically over saved frames"
         for checkbox in dialog.findChildren(QCheckBox)
     )
+    assert not any("Galaxy" in checkbox.text() for checkbox in dialog.findChildren(QCheckBox))
 
 
 def test_main_hub_exposes_pipeline_and_justice_dance_entries(qt_app):
@@ -134,49 +133,40 @@ def test_main_hub_exposes_pipeline_and_justice_dance_entries(qt_app):
         assert dialog.justice_dance_button.text().startswith("Justice Dance")
         assert "just_dance" in dialog.game_buttons
         assert len(dialog.game_buttons) == 17
-        assert not dialog.aihumo_button.icon().isNull()
-        assert all(not bubble.artwork.isNull() for bubble in dialog.galaxy.bubbles)
+        assert dialog.NAV_ITEMS == (
+            "Home", "Movement Analysis", "Games", "Training", "Rehabilitation", "Cognitive Games"
+        )
     finally:
         dialog.close()
 
 
-def test_main_hub_supports_all_four_visual_combinations(qt_app, tmp_path):
+def test_main_hub_supports_light_and_dark_without_galaxy(qt_app, tmp_path):
     store = PreferenceStore(tmp_path / "settings.json")
     dialog = MainHubDialog(state_dir=tmp_path, preferences=store)
     try:
-        for theme, galaxy, expected_index in (
-            ("Light", False, 0),
-            ("Dark", False, 0),
-            ("Light", True, 1),
-            ("Dark", True, 1),
-        ):
+        for theme in ("Light", "Dark"):
             dialog.theme_combo.setCurrentText(theme)
-            dialog.galaxy_toggle.setChecked(galaxy)
-            # The first Light/standard combination can already be the visual
-            # state mapped from a legacy "System" preference, so exercise the
-            # same save path even when QComboBox has no index change to emit.
             dialog._visual_option_changed()
             qt_app.processEvents()
-            assert dialog.all_apps_stack.currentIndex() == expected_index
-            assert dialog.galaxy.dark is (theme == "Dark")
             loaded = PreferenceStore(tmp_path / "settings.json").values
             assert loaded.theme == theme
-            assert loaded.hub_galaxy_mode is galaxy
+        assert not hasattr(dialog, "galaxy")
+        assert not hasattr(dialog, "galaxy_toggle")
     finally:
         dialog.close()
 
 
-def test_galaxy_apps_are_arranged_without_overlap(qt_app, tmp_path):
-    store = PreferenceStore(tmp_path / "settings.json")
-    store.save(DesktopPreferences(theme="Dark", hub_galaxy_mode=True))
-    dialog = MainHubDialog(state_dir=tmp_path, preferences=store)
+def test_main_hub_has_three_recent_slots_and_persists_unique_apps(qt_app, tmp_path):
+    dialog = MainHubDialog(state_dir=tmp_path)
     try:
-        dialog.resize(1200, 800)
-        dialog.show()
-        qt_app.processEvents()
-        positions = {(bubble.x(), bubble.y()) for bubble in dialog.galaxy.bubbles}
-        assert len(positions) == len(dialog.galaxy.bubbles)
-        assert not dialog.home_scroll.horizontalScrollBar().isVisible()
+        assert len(dialog.recent_cards) == 3
+        assert all(card.app is None for card in dialog.recent_cards)
+        for app_id in ("annotation", "spelling_bee", "balance", "annotation"):
+            dialog._remember_app(dialog.app_by_id[app_id])
+        assert dialog._recent_app_ids() == ["annotation", "balance", "spelling_bee"]
+        assert [card.app.id for card in dialog.recent_cards if card.app] == [
+            "annotation", "balance", "spelling_bee"
+        ]
     finally:
         dialog.close()
 
@@ -189,19 +179,15 @@ def test_hub_text_wraps_and_grids_reflow(qt_app, tmp_path):
         qt_app.processEvents()
         assert all(label.wordWrap() for label in dialog.category_descriptions.values())
         for grid in dialog.category_grids.values():
-            grid.resize(700, grid.height())
+            assert grid.cards
+            grid.resize(760, grid.height())
             grid._reflow()
             assert grid._columns == 2
-        for bubble in dialog.galaxy.bubbles:
-            assert bubble.caption.wordWrap()
-            available = bubble.caption.rect().adjusted(8, 6, -8, -6)
-            bounds = QFontMetrics(bubble.caption.font()).boundingRect(
-                available,
-                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
-                bubble.app.title,
-            )
-            assert bounds.height() <= available.height()
-            assert bounds.width() <= available.width()
+            assert grid.grid.count() == len(grid.cards)
+        assert all(section.description_label.wordWrap() for section in dialog.home_sections.values())
+        footer_texts = [label.text() for label in dialog.findChildren(QLabel)]
+        assert "Sir Jax Big Boi J" in footer_texts
+        assert not dialog.home_scroll.horizontalScrollBar().isVisible()
     finally:
         dialog.close()
 

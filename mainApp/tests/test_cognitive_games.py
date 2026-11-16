@@ -67,13 +67,10 @@ def test_hub_exposes_standalone_cognitive_games(qt_app):
         qt_app.processEvents()
         assert dialog.pages.currentIndex() == dialog.NAV_ITEMS.index("Cognitive Games")
         assert {card.app.id for card in dialog.category_grids["Cognitive Games"].cards} == {
+            "sequence",
             "spelling_bee",
             "math_challenge",
         }
-
-        galaxy_apps = {bubble.app.id: bubble for bubble in dialog.galaxy.bubbles}
-        for app_id in ("spelling_bee", "math_challenge"):
-            assert app_id in galaxy_apps
-            assert not galaxy_apps[app_id].artwork.isNull()
+        assert all(card.filter_match for card in dialog.category_grids["Cognitive Games"].cards)
     finally:
         dialog.close()

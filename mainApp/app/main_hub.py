@@ -1,43 +1,22 @@
-"""Primary AIHuMo desktop Hub with dashboard and App Galaxy views."""
+"""Primary AIHuMo desktop hub and app catalogue."""
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
-import textwrap
 from typing import Callable
 
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QButtonGroup,
-    QCheckBox,
-    QComboBox,
-    QDialog,
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QScrollArea,
-    QSizePolicy,
-    QStackedWidget,
-    QToolButton,
-    QVBoxLayout,
+    QButtonGroup, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout,
     QWidget,
 )
 
-from aihumo.storage import load_json
+from aihumo.storage import load_json, save_json_atomic
 from .cognitive_games import CognitiveGameDialog
 from .movement_games import MovementGameDialog, load_game_definitions
 from .preferences import PreferenceStore, PreferencesDialog
-
-
-ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "hub_cards"
-
-
-def hub_art_path(filename: str) -> Path:
-    return ASSET_DIR / filename
 
 
 @dataclass(frozen=True)
@@ -45,202 +24,201 @@ class HubApp:
     id: str
     title: str
     subtitle: str
+    description: str
     section: str
-    accent: str
-    art: str = "processing.jpg"
     mode: int | None = None
     game_id: str | None = None
     cognitive_game_id: str | None = None
-    featured: bool = False
+
+
+CATEGORY_DESCRIPTIONS = {
+    "Movement Analysis": (
+        "Prepare recordings, create layered annotations, align sessions, and inspect synchronized "
+        "2D or 3D measurements. These workspaces share the same processed videos and feature files."
+    ),
+    "Games": (
+        "Reaction, rhythm, coordination, agility, and social movement experiences driven by the "
+        "shared AIHuMo pose and game-rule engines."
+    ),
+    "Training": (
+        "Focused drills for balance, controlled movement, sport reaction, and repeatable skills. "
+        "Difficulty and scoring can build on each participant's movement range."
+    ),
+    "Rehabilitation": (
+        "Controlled range-of-motion, gait, posture, and ergonomic review tools. These workspaces are "
+        "analysis aids and do not replace professional medical judgment."
+    ),
+    "Cognitive Games": (
+        "Memory, sequencing, spelling, and mathematics activities. Some combine thinking with movement; "
+        "others can be played without a camera or pose features."
+    ),
+}
 
 
 PIPELINE_APPS = (
-    HubApp("pipeline", "AIHuMo Pipeline", "Process · Annotate · Analyze", "Movement Analysis", "#2dc7e8", "processing.jpg", featured=True),
-    HubApp("annotation", "Annotation Studio", "Layered movement labels", "Movement Analysis", "#8a6df1", "annotation.jpg", mode=1),
-    HubApp("alignment", "Session Alignment", "Multi-camera synchronization", "Movement Analysis", "#5a8dee", "partner-sync.jpg", mode=2),
-    HubApp("graph_2d", "Graph Viewer 2D", "Angles · Motion · Timelines", "Movement Analysis", "#28c8a2", "graphs-3d.jpg", mode=3, featured=True),
-    HubApp("graph_3d", "Graph Viewer 3D", "Pose space · 3D review", "Movement Analysis", "#e58c55", "graphs-3d.jpg", mode=4),
+    HubApp(
+        "pipeline", "AIHuMo Pipeline", "Process · Annotate · Analyze",
+        "Open the complete AIHuMo Data Studio launcher and choose any processing, annotation, alignment, or graph workflow.",
+        "Movement Analysis",
+    ),
+    HubApp(
+        "annotation", "Annotation Studio", "Mode 1 · Layered annotation",
+        "Label activities, sets, repetitions, phases, form observations, notes, and synchronized frame context.",
+        "Movement Analysis", mode=1,
+    ),
+    HubApp(
+        "alignment", "Session Alignment", "Mode 2 · Multi-camera alignment",
+        "Align related recordings and annotations across cameras, trimmed clips, and session timelines.",
+        "Movement Analysis", mode=2,
+    ),
+    HubApp(
+        "graph_2d", "Interactive Graph Viewer (2D)", "Mode 3 · Image-plane measurements",
+        "Review synchronized skeleton video, 2D joint angles, landmark motion, distances, and annotation overlays.",
+        "Movement Analysis", mode=3,
+    ),
+    HubApp(
+        "graph_3d", "Interactive Graph Viewer (3D)", "Mode 4 · Estimated world measurements",
+        "Inspect the rotatable pose and synchronized estimated-world timelines alongside the source video.",
+        "Movement Analysis", mode=4,
+    ),
 )
 
-
-GAME_ACCENTS = (
-    "#ef6f6c", "#9b72f2", "#21c7d9", "#58c98b", "#e6a14a", "#d95fa5",
-    "#4f8fea", "#62c26f", "#ef8354", "#7b6de5", "#35b7a5", "#d977c7",
-)
-
-GAME_ART = {
-    "just_dance": "dance-rhythm.jpg",
-    "rhythm": "dance-rhythm.jpg",
-    "mirror": "partner-sync.jpg",
-    "partner": "partner-sync.jpg",
-    "path": "balance-rehab.jpg",
-    "freeze": "balance-rehab.jpg",
-    "balance": "balance-rehab.jpg",
-    "rehab": "balance-rehab.jpg",
-    "ergonomics": "balance-rehab.jpg",
-    "gait": "balance-rehab.jpg",
-}
 
 COGNITIVE_APPS = (
     HubApp(
-        "spelling_bee", "Spelling Bee", "Words · Definitions · Recall", "Cognitive Games",
-        "#d95fa5", "spelling-bee.jpg", cognitive_game_id="spelling_bee", featured=True,
+        "spelling_bee", "Spelling Bee", "Words · Definitions · Recall",
+        "Practice spelling from the AIHuMo dictionary with definitions, difficulty controls, rounds, and score feedback.",
+        "Cognitive Games", cognitive_game_id="spelling_bee",
     ),
     HubApp(
-        "math_challenge", "Math Challenge", "Addition · Subtraction · Multiplication · Division", "Cognitive Games",
-        "#e6a14a", "math-challenge.jpg", cognitive_game_id="math_challenge", featured=True,
+        "math_challenge", "Math Challenge", "Arithmetic · Accuracy · Recall",
+        "Solve addition, subtraction, multiplication, and division prompts with adjustable rounds and scoring.",
+        "Cognitive Games", cognitive_game_id="math_challenge",
     ),
 )
+
+
+GAME_SECTIONS = {
+    "path": "Training",
+    "freeze": "Training",
+    "balance": "Training",
+    "sports": "Training",
+    "rehab": "Rehabilitation",
+    "ergonomics": "Rehabilitation",
+    "gait": "Rehabilitation",
+    "sequence": "Cognitive Games",
+}
 
 
 def hub_apps() -> tuple[HubApp, ...]:
     games: list[HubApp] = []
-    training_ids = {"path", "freeze", "balance", "rehab", "ergonomics", "gait"}
-    featured_ids = {"just_dance", "target_grid_6", "reaction", "balance"}
-    for index, definition in enumerate(load_game_definitions()):
-        section = "Training & Rehab" if definition.id in training_ids else "Games"
+    for definition in load_game_definitions():
+        section = GAME_SECTIONS.get(definition.id, "Games")
         games.append(HubApp(
             definition.id,
             definition.title,
-            f"{definition.category} · {definition.objective}",
+            definition.category,
+            f"{definition.description} Objective: {definition.objective}",
             section,
-            GAME_ACCENTS[index % len(GAME_ACCENTS)],
-            art=GAME_ART.get(definition.id, "targets-agility.jpg"),
             game_id=definition.id,
-            featured=definition.id in featured_ids,
         ))
     return (*PIPELINE_APPS, *games, *COGNITIVE_APPS)
 
 
-class SkeletonPreview(QWidget):
-    """Small inexpensive preview used until a cached video thumbnail exists."""
+class ThumbnailPlaceholder(QFrame):
+    """Reserved rectangular area for future app and session thumbnails."""
 
-    def __init__(self, accent: str, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.accent = QColor(accent)
-        self.setFixedSize(150, 78)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#111827"))
-        painter.drawRoundedRect(self.rect(), 12, 12)
-        pen = QPen(self.accent, 3)
-        painter.setPen(pen)
-        w, h = self.width(), self.height()
-        points = {
-            "head": QPoint(w // 2, 15), "neck": QPoint(w // 2, 26),
-            "left_hand": QPoint(w // 2 - 30, 38), "right_hand": QPoint(w // 2 + 30, 37),
-            "hip": QPoint(w // 2, 49), "left_foot": QPoint(w // 2 - 20, 69),
-            "right_foot": QPoint(w // 2 + 22, 69),
-        }
-        for first, second in (("head", "neck"), ("neck", "left_hand"), ("neck", "right_hand"),
-                              ("neck", "hip"), ("hip", "left_foot"), ("hip", "right_foot")):
-            painter.drawLine(points[first], points[second])
-        painter.setBrush(self.accent)
-        for point in points.values():
-            painter.drawEllipse(point, 4, 4)
+        self.setObjectName("thumbnailPlaceholder")
+        self.setAccessibleName("Thumbnail placeholder")
+        self.setMinimumSize(176, 104)
+        self.setMaximumHeight(126)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
 
-class ArtworkPreview(QLabel):
-    """Fast, cropped preview of a Hub artwork asset."""
-
-    def __init__(self, art: str, accent: str, parent=None):
+class RecentAppCard(QFrame):
+    def __init__(self, app: HubApp | None, launch: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
-        self.setFixedSize(150, 78)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        source = QPixmap(str(hub_art_path(art)))
-        if source.isNull():
-            self.setText("●")
-            self.setStyleSheet(f"background: #111827; color: {accent}; border-radius: 12px; font-size: 34px;")
-            return
-        scaled = source.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                               Qt.TransformationMode.SmoothTransformation)
-        x = max(0, (scaled.width() - self.width()) // 2)
-        y = max(0, (scaled.height() - self.height()) // 2)
-        self.setPixmap(scaled.copy(x, y, self.width(), self.height()))
-        self.setStyleSheet("border-radius: 12px;")
-
-
-class RecentCard(QFrame):
-    def __init__(self, record: dict, resume: Callable[[], None], dark: bool, parent=None):
-        super().__init__(parent)
-        self.setObjectName("recentCard")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(16)
-        layout.addWidget(ArtworkPreview(record["art"], record["accent"]))
-        details = QVBoxLayout()
-        title = QLabel(record["title"])
-        title.setObjectName("recentTitle")
-        title.setStyleSheet("font-weight: 700; font-size: 16px;")
+        self.app = app
+        self.setObjectName("recentAppCard")
+        self.setMinimumWidth(230)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(9)
+        layout.addWidget(ThumbnailPlaceholder())
+        title = QLabel(app.title if app else "No recent app yet", objectName="cardTitle")
         title.setWordWrap(True)
-        details.addWidget(title)
-        file_label = QLabel(record["file"])
-        file_label.setObjectName("mutedText")
-        file_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        file_label.setWordWrap(True)
-        details.addWidget(file_label)
-        detail_label = QLabel(record["detail"], objectName="mutedText")
-        detail_label.setWordWrap(True)
-        details.addWidget(detail_label)
-        layout.addLayout(details, 1)
-        status = QLabel(record["status"])
-        status.setObjectName("statusChip")
-        status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status.setMinimumWidth(130)
-        layout.addWidget(status)
-        button = QPushButton("Resume  ▶")
-        button.setObjectName("primaryButton")
-        button.clicked.connect(resume)
+        layout.addWidget(title)
+        subtitle = QLabel(app.subtitle if app else "Your recently opened apps will appear here.", objectName="mutedText")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+        layout.addStretch(1)
+        button = QPushButton(f"Open {app.title}" if app else "Empty slot", objectName="primaryButton")
+        button.setEnabled(app is not None)
+        if app is not None:
+            button.clicked.connect(lambda: launch(app))
         layout.addWidget(button)
 
 
-class AppCard(QToolButton):
+class AppDetailCard(QFrame):
     def __init__(self, app: HubApp, launch: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
         self.app = app
-        self.setObjectName("appCard")
-        title_lines = textwrap.wrap(app.title, width=22, break_long_words=False, break_on_hyphens=False)
-        wrapped_title = "\n".join(title_lines)
-        self.setText(wrapped_title + "\n" + app.section)
-        self.setToolTip(f"{app.subtitle}\nClick to open {app.title}.")
-        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.setIcon(QIcon(str(hub_art_path(app.art))))
-        self.setIconSize(QSize(148, 148))
-        self.setMinimumHeight(232)
-        # Ignore long subtitle size hints so the responsive grid can contract
-        # without creating a horizontal page scrollbar.
+        self.filter_match = True
+        self.setObjectName("appDetailCard")
         self.setMinimumWidth(0)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.clicked.connect(lambda: launch(app))
+        self.setMinimumHeight(320)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(9)
+        layout.addWidget(ThumbnailPlaceholder())
+        title = QLabel(app.title, objectName="cardTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        subtitle = QLabel(app.subtitle, objectName="categoryChip")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+        description = QLabel(app.description, objectName="cardDescription")
+        description.setWordWrap(True)
+        description.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        description.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        description.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout.addWidget(description)
+        layout.addStretch(1)
+        self.open_button = QPushButton(f"{app.title}  →", objectName="primaryButton")
+        self.open_button.setToolTip(f"Open {app.title}")
+        self.open_button.clicked.connect(lambda: launch(app))
+        layout.addWidget(self.open_button)
 
-    def resizeEvent(self, event):
-        side = max(112, min(154, self.width() - 34))
-        self.setIconSize(QSize(side, side))
-        super().resizeEvent(event)
+    def matches(self, query: str) -> bool:
+        text = f"{self.app.title} {self.app.subtitle} {self.app.description} {self.app.section}".casefold()
+        return not query or query in text
 
 
-class AppGrid(QWidget):
+class AppDetailGrid(QWidget):
+    """Responsive card grid that remains populated while its stacked page is hidden."""
+
     def __init__(self, apps: tuple[HubApp, ...], launch: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
-        self.cards: list[AppCard] = []
+        self.cards = [AppDetailCard(app, launch) for app in apps]
         self.grid = QGridLayout(self)
-        self.grid.setContentsMargins(8, 8, 8, 8)
-        self.grid.setHorizontalSpacing(14)
-        self.grid.setVerticalSpacing(14)
+        self.grid.setContentsMargins(0, 8, 0, 8)
+        self.grid.setHorizontalSpacing(16)
+        self.grid.setVerticalSpacing(16)
         self._columns = 0
-        for app in apps:
-            card = AppCard(app, launch)
-            self.cards.append(card)
-        self._reflow(4)
+        self._reflow(3)
 
-    def filter(self, query: str) -> None:
+    def filter(self, query: str) -> int:
         query = query.casefold().strip()
+        count = 0
         for card in self.cards:
-            card.setVisible(not query or query in f"{card.app.title} {card.app.subtitle} {card.app.section}".casefold())
+            card.filter_match = card.matches(query)
+            card.setVisible(card.filter_match)
+            count += int(card.filter_match)
         self._reflow()
+        return count
 
     def resizeEvent(self, event):
         self._reflow()
@@ -252,177 +230,78 @@ class AppGrid(QWidget):
 
     def _reflow(self, columns: int | None = None) -> None:
         if columns is None:
-            columns = max(1, min(4, max(1, self.width()) // 260))
-        visible = [card for card in self.cards if card.isVisible()]
-        if columns == self._columns and self.grid.count() == len(visible):
-            return
+            columns = max(1, min(3, max(1, self.width()) // 370))
+        matches = [card for card in self.cards if card.filter_match]
         for card in self.cards:
             self.grid.removeWidget(card)
-        for index, card in enumerate(visible):
+        for index, card in enumerate(matches):
             self.grid.addWidget(card, index // columns, index % columns)
-        for column in range(4):
+        for column in range(3):
             self.grid.setColumnStretch(column, 1 if column < columns else 0)
         self._columns = columns
         self.updateGeometry()
 
 
-class BubbleButton(QPushButton):
-    def __init__(self, app: HubApp, launch: Callable[[HubApp], None], diameter: int, parent=None):
+class CategorySection(QFrame):
+    def __init__(self, title: str, description: str, apps: tuple[HubApp, ...],
+                 launch: Callable[[HubApp], None], *, expanded: bool,
+                 collapsible: bool = True, parent=None):
         super().__init__(parent)
-        self.app = app
-        self.diameter = diameter
-        self.setText(f"{app.title}\n{app.section}")
-        self.setToolTip(app.subtitle)
-        self.setFixedSize(diameter, diameter)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setAccessibleName(f"{app.title}. {app.subtitle}")
-        self.artwork = QPixmap(str(hub_art_path(app.art)))
-        self.clicked.connect(lambda: launch(app))
-        self.setText("")
-        self.setIcon(self._circular_icon())
-        self.setIconSize(QSize(diameter - 12, diameter - 12))
-        self.setStyleSheet(
-            f"QPushButton {{ background: {app.accent}; border: 3px solid rgba(255,255,255,175); "
-            f"border-radius: {diameter // 2}px; }}"
-            "QPushButton:hover { border: 5px solid white; }"
-            "QPushButton:focus { border: 5px solid #ffe66d; }"
-        )
-        self.caption = QLabel(app.title, self)
-        self.caption.setWordWrap(True)
-        self.caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.caption.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.caption.setStyleSheet(
-            "color: white; background: rgba(4, 12, 30, 175); border-radius: 9px; "
-            "padding: 4px;"
-        )
-        self.caption.setGeometry(6, int(diameter * 0.45), diameter - 12, int(diameter * 0.47))
-        self._fit_caption_font()
+        self.setObjectName("categorySection")
+        self.title = title
+        self.description = description
+        self.collapsible = collapsible
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.header = QPushButton(objectName="categoryHeader")
+        self.header.setCheckable(collapsible)
+        self.header.clicked.connect(self._toggle)
+        outer.addWidget(self.header)
+        self.content = QWidget(objectName="categoryContent")
+        content_layout = QVBoxLayout(self.content)
+        content_layout.setContentsMargins(20, 16, 20, 20)
+        content_layout.setSpacing(10)
+        self.description_label = QLabel(description, objectName="categoryDescription")
+        self.description_label.setWordWrap(True)
+        self.description_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.description_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        content_layout.addWidget(self.description_label)
+        self.grid = AppDetailGrid(apps, launch)
+        content_layout.addWidget(self.grid)
+        outer.addWidget(self.content)
+        self.set_expanded(expanded)
 
-    def _fit_caption_font(self) -> None:
-        available = self.caption.rect().adjusted(8, 6, -8, -6)
-        maximum = 12 if self.diameter >= 170 else 11 if self.diameter >= 145 else 10
-        flags = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
-        for point_size in range(maximum, 6, -1):
-            font = QFont("Segoe UI", point_size, QFont.Weight.Bold)
-            bounds = QFontMetrics(font).boundingRect(available, flags, self.app.title)
-            if bounds.height() <= available.height() and bounds.width() <= available.width():
-                self.caption.setFont(font)
-                return
-        self.caption.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+    def _toggle(self) -> None:
+        if self.collapsible:
+            self.set_expanded(self.header.isChecked())
 
-    def _circular_icon(self) -> QIcon:
-        side = self.diameter - 12
-        canvas = QPixmap(side, side)
-        canvas.fill(Qt.GlobalColor.transparent)
-        if self.artwork.isNull():
-            return QIcon(canvas)
-        painter = QPainter(canvas)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        clip = QPainterPath()
-        clip.addEllipse(0.0, 0.0, float(side), float(side))
-        painter.setClipPath(clip)
-        scaled = self.artwork.scaled(canvas.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                     Qt.TransformationMode.SmoothTransformation)
-        painter.drawPixmap((side - scaled.width()) // 2, (side - scaled.height()) // 2, scaled)
-        painter.end()
-        return QIcon(canvas)
+    def set_expanded(self, expanded: bool) -> None:
+        self.header.setChecked(expanded if self.collapsible else False)
+        self.content.setVisible(expanded)
+        arrow = "v" if expanded else ">"
+        self.header.setText(f"{arrow}  {self.title}")
+        self.header.setAccessibleName(f"{self.title}, {'expanded' if expanded else 'collapsed'}")
 
-
-class GalaxyWidget(QWidget):
-    """Full-height, responsive bubble view with light-sun and dark-moon scenes."""
-
-    def __init__(self, apps: tuple[HubApp, ...], launch: Callable[[HubApp], None], dark=False, parent=None):
-        super().__init__(parent)
-        self.dark = dark
-        self.bubbles: list[BubbleButton] = []
-        self.setMinimumHeight(720)
-        for app in apps:
-            diameter = 190 if app.id == "pipeline" else 164 if app.featured else 156
-            self.bubbles.append(BubbleButton(app, launch, diameter, self))
-
-    def set_dark(self, dark: bool) -> None:
-        self.dark = dark
-        self.update()
-
-    def filter(self, query: str) -> None:
-        query = query.casefold().strip()
-        for bubble in self.bubbles:
-            bubble.setVisible(not query or query in f"{bubble.app.title} {bubble.app.subtitle} {bubble.app.section}".casefold())
-        self._arrange_bubbles()
-
-    def resizeEvent(self, event):
-        self._arrange_bubbles()
-        super().resizeEvent(event)
-
-    def showEvent(self, event):
-        # QStackedWidget can size this page while it is hidden, in which case
-        # no useful resize event reaches the child bubbles. Arrange once more
-        # at the moment Galaxy mode becomes visible.
-        super().showEvent(event)
-        self._arrange_bubbles()
-
-    def _arrange_bubbles(self) -> None:
-        visible = [bubble for bubble in self.bubbles if bubble.isVisible()]
-        width = max(700, self.width())
-        columns = max(3, min(7, width // 205))
-        cell_w = width / columns
-        row_h = 200
-        for index, bubble in enumerate(visible):
-            row, column = divmod(index, columns)
-            offset = cell_w * 0.22 if row % 2 else 0
-            x = int(column * cell_w + (cell_w - bubble.width()) / 2 + offset)
-            max_x = max(0, width - bubble.width() - 8)
-            y = int(120 + row * row_h + (18 if column % 2 else 0))
-            bubble.move(max(8, min(max_x, x)), y)
-        rows = (len(visible) + columns - 1) // columns
-        self.setMinimumHeight(max(720, 160 + rows * row_h))
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        gradient = QLinearGradient(0, 0, 0, self.height())
-        if self.dark:
-            gradient.setColorAt(0, QColor("#07152f"))
-            gradient.setColorAt(1, QColor("#17113d"))
-        else:
-            gradient.setColorAt(0, QColor("#eaf8ff"))
-            gradient.setColorAt(1, QColor("#fff4dc"))
-        painter.fillRect(self.rect(), gradient)
-        painter.setPen(Qt.PenStyle.NoPen)
-        if self.dark:
-            painter.setBrush(QColor("#f4f1cf"))
-            painter.drawEllipse(self.width() - 150, 38, 72, 72)
-            painter.setBrush(QColor("#07152f"))
-            painter.drawEllipse(self.width() - 128, 25, 72, 72)
-            painter.setBrush(QColor(255, 255, 255, 160))
-            for index in range(38):
-                x = (index * 137 + 31) % max(1, self.width())
-                y = (index * 83 + 17) % max(1, self.height())
-                painter.drawEllipse(x, y, 3, 3)
-        else:
-            painter.setBrush(QColor("#ffd166"))
-            painter.drawEllipse(self.width() - 150, 36, 78, 78)
-            painter.setPen(QPen(QColor(255, 193, 66, 120), 3))
-            center = QPoint(self.width() - 111, 75)
-            for dx, dy in ((0, -58), (0, 58), (-58, 0), (58, 0), (-42, -42), (42, 42), (-42, 42), (42, -42)):
-                painter.drawLine(center, center + QPoint(dx, dy))
+    def filter(self, query: str, *, auto_expand: bool = False) -> int:
+        description_match = bool(query and query in f"{self.title} {self.description}".casefold())
+        count = self.grid.filter("" if description_match else query)
+        self.setVisible(bool(count))
+        if auto_expand and query and count:
+            self.set_expanded(True)
+        return count
 
 
 class MainHubDialog(QDialog):
-    """Persistent Main Hub with fixed navigation and four visual combinations."""
+    """Project entry point with recent apps and a categorized app catalogue."""
 
-    NAV_ITEMS = ("Home", "Movement Analysis", "Games", "Training & Rehab", "Cognitive Games")
+    NAV_ITEMS = ("Home", "Movement Analysis", "Games", "Training", "Rehabilitation", "Cognitive Games")
 
-    def __init__(
-        self,
-        parent=None,
-        *,
-        open_pipeline: Callable[[], None] | None = None,
-        open_pipeline_mode: Callable[[int], None] | None = None,
-        resume_mode: Callable[[int], None] | None = None,
-        state_dir: Path | None = None,
-        preferences: PreferenceStore | None = None,
-    ):
+    def __init__(self, parent=None, *, open_pipeline: Callable[[], None] | None = None,
+                 open_pipeline_mode: Callable[[int], None] | None = None,
+                 resume_mode: Callable[[int], None] | None = None,
+                 state_dir: Path | None = None,
+                 preferences: PreferenceStore | None = None):
         super().__init__(parent)
         self._open_pipeline_callback = open_pipeline
         self._open_pipeline_mode_callback = open_pipeline_mode
@@ -430,11 +309,14 @@ class MainHubDialog(QDialog):
         self.state_dir = state_dir or Path(__file__).resolve().parents[1] / ".aihumo"
         self.preferences = preferences or PreferenceStore(self.state_dir / "settings.json")
         self.apps = hub_apps()
-        self.setWindowTitle("AIHuMo Main Hub")
-        self.resize(1320, 820)
-        self.filterables: list[AppGrid | GalaxyWidget] = []
+        self.app_by_id = {app.id: app for app in self.apps}
+        self.recent_path = self.state_dir / "recent_hub_apps.json"
         self.category_descriptions: dict[str, QLabel] = {}
-        self.category_grids: dict[str, AppGrid] = {}
+        self.category_grids: dict[str, AppDetailGrid] = {}
+        self.home_sections: dict[str, CategorySection] = {}
+        self.filterables: list[CategorySection] = []
+        self.setWindowTitle("AIHuMo Main Hub")
+        self.resize(1380, 850)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -450,10 +332,10 @@ class MainHubDialog(QDialog):
     def _navigation(self) -> QWidget:
         bar = QFrame(objectName="navBar")
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(22, 12, 22, 12)
-        title = QLabel("◒  AIHuMo Main Hub", objectName="hubBrand")
-        layout.addWidget(title)
-        layout.addSpacing(18)
+        layout.setContentsMargins(20, 11, 20, 11)
+        layout.setSpacing(6)
+        layout.addWidget(QLabel("AIHuMo", objectName="hubBrand"))
+        layout.addSpacing(12)
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self.nav_buttons: list[QPushButton] = []
@@ -461,26 +343,22 @@ class MainHubDialog(QDialog):
             button = QPushButton(text, objectName="navButton")
             button.setCheckable(True)
             button.setChecked(index == 0)
-            button.clicked.connect(lambda checked=False, page=index: self.pages.setCurrentIndex(page))
+            button.clicked.connect(lambda checked=False, page=index: self._select_page(page))
             self.nav_group.addButton(button, index)
             self.nav_buttons.append(button)
             layout.addWidget(button)
         layout.addStretch(1)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search apps, sessions, files…")
+        self.search.setPlaceholderText("Search apps…")
         self.search.setClearButtonEnabled(True)
-        self.search.setMaximumWidth(300)
+        self.search.setMaximumWidth(220)
         self.search.textChanged.connect(self._filter_apps)
         layout.addWidget(self.search)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(("Light", "Dark"))
         self.theme_combo.currentTextChanged.connect(self._visual_option_changed)
         layout.addWidget(self.theme_combo)
-        self.galaxy_toggle = QCheckBox("Galaxy")
-        self.galaxy_toggle.toggled.connect(self._visual_option_changed)
-        layout.addWidget(self.galaxy_toggle)
-        settings = QPushButton("⚙", objectName="iconButton")
-        settings.setToolTip("Open AIHuMo settings")
+        settings = QPushButton("Settings", objectName="quietButton")
         settings.clicked.connect(self._open_settings)
         layout.addWidget(settings)
         close = QPushButton("Exit", objectName="quietButton")
@@ -488,115 +366,123 @@ class MainHubDialog(QDialog):
         layout.addWidget(close)
         return bar
 
-    def _home_page(self) -> QWidget:
-        self.home_scroll = QScrollArea()
-        self.home_scroll.setWidgetResizable(True)
-        self.home_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.home_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QWidget(objectName="hubBody")
-        layout = QVBoxLayout(body)
-        layout.setContentsMargins(28, 24, 28, 28)
-        layout.setSpacing(18)
-        hero = QLabel("Welcome back\nContinue movement analysis, training, or play.", objectName="heroTitle")
-        layout.addWidget(hero)
-        heading = QLabel("Recent Work", objectName="sectionTitle")
-        layout.addWidget(heading)
-        records = self._recent_records()
-        if records:
-            for record in records:
-                layout.addWidget(RecentCard(record, lambda mode=record["mode"]: self._resume_mode(mode), False))
-        else:
-            empty = QLabel("No recent sessions yet. Open the AIHuMo Pipeline or a game to begin.", objectName="emptyState")
-            empty.setMinimumHeight(150)
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(empty)
-        layout.addSpacing(12)
-        all_heading = QLabel("All Apps", objectName="sectionTitle")
-        layout.addWidget(all_heading)
-        self.all_apps_stack = QStackedWidget()
-        standard = AppGrid(self.apps, self._launch_app)
-        # Keep the original public button handles so existing integrations and
-        # automation can continue launching the same workspaces after the Hub
-        # visual redesign.
-        cards = {card.app.id: card for card in standard.cards}
-        self.aihumo_button = cards["pipeline"]
-        self.justice_dance_button = cards["just_dance"]
-        self.game_buttons = {
-            card.app.game_id: card for card in standard.cards if card.app.game_id is not None
-        }
-        self.galaxy = GalaxyWidget(self.apps, self._launch_app)
-        self.filterables.extend((standard, self.galaxy))
-        self.all_apps_stack.addWidget(standard)
-        self.all_apps_stack.addWidget(self.galaxy)
-        layout.addWidget(self.all_apps_stack)
-        self.home_scroll.setWidget(body)
-        return self.home_scroll
-
-    def _category_page(self, section: str) -> QWidget:
+    def _scroll_page(self) -> tuple[QScrollArea, QWidget, QVBoxLayout]:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget(objectName="hubBody")
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(28, 28, 28, 28)
-        heading = QLabel(section, objectName="heroTitle")
-        layout.addWidget(heading)
-        description = {
-            "Movement Analysis": "Process recordings, annotate movement, align cameras, and inspect synchronized graphs.",
-            "Games": "Reaction, rhythm, coordination, social, and movement-play experiences.",
-            "Training & Rehab": "Controlled balance, mobility, rehabilitation, gait, and ergonomic workspaces.",
-            "Cognitive Games": "Standalone spelling and mathematics games that do not require a video or pose features.",
-        }[section]
-        description_label = QLabel(description, objectName="categoryDescription")
-        description_label.setWordWrap(True)
-        description_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        description_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(description_label)
-        self.category_descriptions[section] = description_label
-        apps = tuple(app for app in self.apps if app.section == section)
-        grid = AppGrid(apps, self._launch_app)
-        self.category_grids[section] = grid
-        self.filterables.append(grid)
-        layout.addWidget(grid)
-        layout.addStretch(1)
+        layout.setContentsMargins(30, 26, 30, 24)
+        layout.setSpacing(18)
         scroll.setWidget(body)
+        return scroll, body, layout
+
+    def _home_page(self) -> QWidget:
+        self.home_scroll, _, layout = self._scroll_page()
+        hero = QLabel("Your movement workspace", objectName="heroTitle")
+        hero.setWordWrap(True)
+        layout.addWidget(hero)
+        intro = QLabel("Continue a recent app or browse the complete AIHuMo collection by category.", objectName="heroSubtitle")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        layout.addWidget(QLabel("Recent Apps", objectName="sectionTitle"))
+        self.recent_cards_host = QWidget()
+        self.recent_cards_layout = QGridLayout(self.recent_cards_host)
+        self.recent_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.recent_cards_layout.setHorizontalSpacing(16)
+        layout.addWidget(self.recent_cards_host)
+        self._refresh_recent_cards()
+        layout.addSpacing(14)
+        layout.addWidget(QLabel("All Apps", objectName="sectionTitle"))
+        all_apps_intro = QLabel(
+            "Select a category to expand it. The same categories are available in the navigation bar for a focused view.",
+            objectName="mutedText",
+        )
+        all_apps_intro.setWordWrap(True)
+        layout.addWidget(all_apps_intro)
+        for section in self.NAV_ITEMS[1:]:
+            apps = tuple(app for app in self.apps if app.section == section)
+            category = CategorySection(section, CATEGORY_DESCRIPTIONS[section], apps, self._launch_app,
+                                       expanded=False, collapsible=True)
+            self.home_sections[section] = category
+            self.filterables.append(category)
+            layout.addWidget(category)
+        layout.addSpacing(24)
+        layout.addWidget(self._footer())
+
+        home_cards = {card.app.id: card for section in self.home_sections.values() for card in section.grid.cards}
+        self.aihumo_button = home_cards["pipeline"].open_button
+        self.justice_dance_button = home_cards["just_dance"].open_button
+        self.game_buttons = {
+            card.app.game_id: card.open_button for card in home_cards.values() if card.app.game_id is not None
+        }
+        return self.home_scroll
+
+    def _category_page(self, section: str) -> QWidget:
+        scroll, _, layout = self._scroll_page()
+        heading = QLabel(section, objectName="heroTitle")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        apps = tuple(app for app in self.apps if app.section == section)
+        category = CategorySection(section, CATEGORY_DESCRIPTIONS[section], apps, self._launch_app,
+                                   expanded=True, collapsible=False)
+        self.category_descriptions[section] = category.description_label
+        self.category_grids[section] = category.grid
+        self.filterables.append(category)
+        layout.addWidget(category)
+        layout.addStretch(1)
+        layout.addWidget(self._footer())
         return scroll
 
-    def _recent_records(self) -> list[dict]:
-        stores = (
-            (0, "AIHuMo Processing", "recent_processing.json", "#2dc7e8", "processing.jpg"),
-            (1, "Annotation Studio", "recent_work.json", "#8a6df1", "annotation.jpg"),
-            (2, "Session Alignment", "recent_alignments.json", "#5a8dee", "partner-sync.jpg"),
-            (3, "Graph Viewer 2D", "recent_graphs.json", "#28c8a2", "graphs-3d.jpg"),
-            (4, "Graph Viewer 3D", "recent_poses.json", "#e58c55", "graphs-3d.jpg"),
-        )
-        records = []
-        for mode, title, filename, accent, art in stores:
-            path = self.state_dir / filename
-            if not path.is_file():
-                continue
-            try:
-                document = load_json(path)
-                items = document.get("items", [])
-                if not items:
-                    continue
-                item = items[0]
-                files = item.get("files", {})
-                preferred = next((value for key, value in files.items() if key in {
-                    "sourceVideo", "processedVideo", "featuresParquet", "alignmentJson", "annotationJson"
-                } and value), "Saved workspace")
-                records.append({
-                    "mode": mode, "title": title, "file": Path(str(preferred)).name,
-                    "detail": item.get("name", "Recent AIHuMo workspace"),
-                    "status": f"Frame {item.get('lastFrame', 0):,}" if item.get("lastFrame") is not None else "Ready",
-                    "accent": accent, "art": art, "mtime": path.stat().st_mtime,
-                })
-            except (OSError, ValueError, TypeError):
-                continue
-        return sorted(records, key=lambda record: record["mtime"], reverse=True)[:3]
+    @staticmethod
+    def _footer() -> QFrame:
+        footer = QFrame(objectName="hubFooter")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(12, 18, 12, 18)
+        label = QLabel("Sir Jax Big Boi J", objectName="footerText")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        footer_layout.addWidget(label)
+        return footer
+
+    def _recent_app_ids(self) -> list[str]:
+        try:
+            document = load_json(self.recent_path)
+        except (OSError, ValueError, TypeError):
+            return []
+        items = document.get("items", []) if isinstance(document, dict) else []
+        result: list[str] = []
+        for item in items:
+            app_id = item.get("appId") if isinstance(item, dict) else None
+            if app_id in self.app_by_id and app_id not in result:
+                result.append(app_id)
+        return result[:3]
+
+    def _remember_app(self, app: HubApp) -> None:
+        ids = [app.id, *(item for item in self._recent_app_ids() if item != app.id)][:3]
+        document = {
+            "version": 1,
+            "items": [{"appId": app_id, "openedAt": datetime.now(timezone.utc).isoformat()} for app_id in ids],
+        }
+        save_json_atomic(document, self.recent_path)
+        self._refresh_recent_cards()
+
+    def _refresh_recent_cards(self) -> None:
+        while self.recent_cards_layout.count():
+            item = self.recent_cards_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        recent = [self.app_by_id[app_id] for app_id in self._recent_app_ids()]
+        slots: list[HubApp | None] = [*recent, *([None] * (3 - len(recent)))]
+        self.recent_cards: list[RecentAppCard] = []
+        for index, app in enumerate(slots[:3]):
+            card = RecentAppCard(app, self._launch_app)
+            self.recent_cards.append(card)
+            self.recent_cards_layout.addWidget(card, 0, index)
+            self.recent_cards_layout.setColumnStretch(index, 1)
 
     def _launch_app(self, app: HubApp) -> None:
+        self._remember_app(app)
         if app.cognitive_game_id:
             CognitiveGameDialog(app.cognitive_game_id, self).exec()
             return
@@ -623,20 +509,24 @@ class MainHubDialog(QDialog):
             self._open_pipeline_callback()
 
     def open_game(self, game_id: str) -> None:
+        app = self.app_by_id.get(game_id)
+        if app is not None:
+            self._remember_app(app)
         MovementGameDialog(game_id, self).exec()
 
+    def _select_page(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        self.search.clear()
+
     def _filter_apps(self, text: str) -> None:
-        for widget in self.filterables:
-            widget.filter(text)
+        query = text.casefold().strip()
+        for section in self.filterables:
+            section.filter(query, auto_expand=section in self.home_sections.values())
 
     def _visual_option_changed(self, *_args) -> None:
-        if not hasattr(self, "all_apps_stack"):
+        if not hasattr(self, "theme_combo"):
             return
-        self.preferences.save(replace(
-            self.preferences.values,
-            theme=self.theme_combo.currentText(),
-            hub_galaxy_mode=self.galaxy_toggle.isChecked(),
-        ))
+        self.preferences.save(replace(self.preferences.values, theme=self.theme_combo.currentText()))
         self._apply_preferences()
 
     def _open_settings(self) -> None:
@@ -644,58 +534,55 @@ class MainHubDialog(QDialog):
             self._apply_preferences()
 
     def _apply_preferences(self) -> None:
-        values = self.preferences.values
-        theme = "Dark" if values.theme == "Dark" else "Light"
+        theme = "Dark" if self.preferences.values.theme == "Dark" else "Light"
         self.theme_combo.blockSignals(True)
         self.theme_combo.setCurrentText(theme)
         self.theme_combo.blockSignals(False)
-        self.galaxy_toggle.blockSignals(True)
-        self.galaxy_toggle.setChecked(values.hub_galaxy_mode)
-        self.galaxy_toggle.blockSignals(False)
-        self.all_apps_stack.setCurrentIndex(1 if values.hub_galaxy_mode else 0)
-        self.galaxy.set_dark(theme == "Dark")
         self.setStyleSheet(self._stylesheet(theme == "Dark"))
 
     @staticmethod
     def _stylesheet(dark: bool) -> str:
         if dark:
             colors = {
-                "window": "#07152f", "panel": "#101f3e", "card": "#17284a", "text": "#f5f7ff",
-                "muted": "#b8c2dc", "border": "#33466d", "accent": "#24d7e6", "accent2": "#806cf2",
+                "window": "#091426", "panel": "#101d33", "card": "#16263f", "text": "#f5f7ff",
+                "muted": "#b7c2d8", "border": "#354967", "accent": "#36c9d8", "accent2": "#7867ef",
+                "placeholder": "#0c192c",
             }
         else:
             colors = {
-                "window": "#f7f6fb", "panel": "#ffffff", "card": "#ffffff", "text": "#10214a",
-                "muted": "#65708a", "border": "#dde2ee", "accent": "#27c7df", "accent2": "#826cf0",
+                "window": "#f5f7fb", "panel": "#ffffff", "card": "#ffffff", "text": "#15213d",
+                "muted": "#63708a", "border": "#dce2ed", "accent": "#22bdd1", "accent2": "#7563e7",
+                "placeholder": "#eef2f7",
             }
         return f"""
-            QDialog, QWidget#hubBody {{ background: {colors['window']}; color: {colors['text']}; }}
+            QDialog, QWidget#hubBody {{ background: {colors['window']}; color: {colors['text']}; font-family: "Segoe UI"; }}
             QFrame#navBar {{ background: {colors['panel']}; border-bottom: 1px solid {colors['border']}; }}
             QLabel {{ color: {colors['text']}; }}
-            QLabel#hubBrand {{ font-size: 20px; font-weight: 800; }}
-            QLabel#heroTitle {{ font-size: 27px; font-weight: 800; padding: 8px 2px; }}
-            QLabel#sectionTitle {{ font-size: 19px; font-weight: 750; padding-top: 8px; }}
-            QLabel#mutedText {{ color: {colors['muted']}; }}
-            QLabel#emptyState {{ color: {colors['muted']}; background: {colors['card']}; border: 1px dashed {colors['border']}; border-radius: 16px; }}
-            QLabel#statusChip {{ color: {colors['text']}; background: {colors['window']}; border-radius: 13px; padding: 7px 12px; }}
-            QFrame#recentCard {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 16px; }}
-            QPushButton#navButton {{ color: {colors['muted']}; background: transparent; border: none; border-radius: 17px; padding: 8px 14px; font-weight: 650; }}
+            QLabel#hubBrand {{ font-size: 21px; font-weight: 800; padding-right: 5px; }}
+            QLabel#heroTitle {{ font-size: 31px; font-weight: 800; padding-top: 8px; }}
+            QLabel#heroSubtitle, QLabel#mutedText, QLabel#cardDescription, QLabel#categoryDescription {{ color: {colors['muted']}; font-size: 14px; }}
+            QLabel#sectionTitle {{ font-size: 21px; font-weight: 750; padding-top: 8px; }}
+            QLabel#cardTitle {{ font-size: 17px; font-weight: 750; }}
+            QLabel#categoryChip {{ color: {colors['accent']}; font-weight: 700; }}
+            QLabel#footerText {{ color: {colors['muted']}; font-weight: 650; }}
+            QFrame#hubFooter {{ border-top: 1px solid {colors['border']}; }}
+            QFrame#thumbnailPlaceholder {{ background: {colors['placeholder']}; border: 1px dashed {colors['border']}; border-radius: 12px; }}
+            QFrame#recentAppCard, QFrame#appDetailCard {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 15px; }}
+            QFrame#recentAppCard:hover, QFrame#appDetailCard:hover {{ border: 2px solid {colors['accent']}; }}
+            QFrame#categorySection {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 14px; }}
+            QWidget#categoryContent {{ background: transparent; }}
+            QPushButton#categoryHeader {{ color: {colors['text']}; background: transparent; border: none; padding: 16px 18px; text-align: left; font-size: 17px; font-weight: 750; }}
+            QPushButton#categoryHeader:hover {{ color: {colors['accent']}; }}
+            QPushButton#navButton {{ color: {colors['muted']}; background: transparent; border: none; border-radius: 15px; padding: 8px 10px; font-weight: 650; }}
             QPushButton#navButton:hover {{ color: {colors['text']}; background: {colors['window']}; }}
             QPushButton#navButton:checked {{ color: #07152f; background: {colors['accent']}; }}
-            QToolButton#appCard {{ color: {colors['text']}; background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 15px; padding: 10px; font-weight: 700; }}
-            QToolButton#appCard:hover {{ border: 2px solid {colors['accent']}; background: {colors['panel']}; }}
-            QPushButton#primaryButton {{ color: white; background: {colors['accent2']}; border: none; border-radius: 15px; padding: 9px 18px; font-weight: 700; }}
+            QPushButton#primaryButton {{ color: white; background: {colors['accent2']}; border: none; border-radius: 12px; padding: 9px 13px; font-weight: 700; }}
             QPushButton#primaryButton:hover {{ background: {colors['accent']}; color: #07152f; }}
-            QPushButton#quietButton, QPushButton#iconButton {{ color: {colors['text']}; background: transparent; border: 1px solid {colors['border']}; border-radius: 12px; padding: 7px 11px; }}
-            QLineEdit, QComboBox {{ color: {colors['text']}; background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 14px; padding: 7px 12px; }}
-            QCheckBox {{ color: {colors['text']}; spacing: 7px; }}
+            QPushButton#primaryButton:disabled {{ background: {colors['border']}; color: {colors['muted']}; }}
+            QPushButton#quietButton {{ color: {colors['text']}; background: transparent; border: 1px solid {colors['border']}; border-radius: 11px; padding: 7px 10px; }}
+            QLineEdit, QComboBox {{ color: {colors['text']}; background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 12px; padding: 7px 10px; }}
             QScrollArea {{ border: none; background: {colors['window']}; }}
             QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px; }}
             QScrollBar::handle:vertical {{ background: {colors['border']}; min-height: 40px; border-radius: 5px; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """
-
-    def resizeEvent(self, event):
-        if hasattr(self, "galaxy") and hasattr(self, "home_scroll"):
-            self.galaxy.setMinimumHeight(max(650, self.home_scroll.viewport().height() - 20))
-        super().resizeEvent(event)
