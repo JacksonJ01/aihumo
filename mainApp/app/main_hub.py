@@ -84,11 +84,11 @@ GAME_ART = {
 COGNITIVE_APPS = (
     HubApp(
         "spelling_bee", "Spelling Bee", "Words · Definitions · Recall", "Cognitive Games",
-        "#d95fa5", "dance-rhythm.jpg", cognitive_game_id="spelling_bee", featured=True,
+        "#d95fa5", "spelling-bee.jpg", cognitive_game_id="spelling_bee", featured=True,
     ),
     HubApp(
         "math_challenge", "Math Challenge", "Addition · Subtraction · Multiplication · Division", "Cognitive Games",
-        "#e6a14a", "targets-agility.jpg", cognitive_game_id="math_challenge", featured=True,
+        "#e6a14a", "math-challenge.jpg", cognitive_game_id="math_challenge", featured=True,
     ),
 )
 
