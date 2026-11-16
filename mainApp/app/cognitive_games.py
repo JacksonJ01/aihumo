@@ -88,9 +88,9 @@ class _GameDialog(QDialog):
         title_label = QLabel(title)
         title_label.setStyleSheet("font-size: 22px; font-weight: 700;")
         heading.addWidget(title_label, 1)
-        back = QPushButton("Back to Hub Page")
-        back.clicked.connect(self.close)
-        heading.addWidget(back)
+        self.back_button = QPushButton("Back to Hub Page")
+        self.back_button.clicked.connect(self.close)
+        heading.addWidget(self.back_button)
         layout.addLayout(heading)
         description = QLabel(subtitle)
         description.setWordWrap(True)
@@ -124,10 +124,10 @@ class SpellingBeeDialog(_GameDialog):
         source_row = QHBoxLayout(source)
         self.dictionary_path = QLineEdit()
         self.dictionary_path.setPlaceholderText("Optional CSV: Word, POS, Definition")
-        choose = QPushButton("Load dictionary…")
-        choose.clicked.connect(self.choose_dictionary)
+        self.dictionary_button = QPushButton("Load dictionary…")
+        self.dictionary_button.clicked.connect(self.choose_dictionary)
         source_row.addWidget(self.dictionary_path, 1)
-        source_row.addWidget(choose)
+        source_row.addWidget(self.dictionary_button)
         layout.addWidget(source)
 
         controls = QFormLayout()
@@ -148,7 +148,7 @@ class SpellingBeeDialog(_GameDialog):
         layout.addWidget(self.definition)
         self.answer = QLineEdit()
         self.answer.setPlaceholderText("Type the spelling here…")
-        self.answer.returnPressed.connect(self.submit_answer)
+        self.answer.returnPressed.connect(self._answer_entered)
         layout.addWidget(self.answer)
         actions = QHBoxLayout()
         self.start_button = QPushButton("Start")
@@ -215,7 +215,7 @@ class SpellingBeeDialog(_GameDialog):
         QApplication.beep()
 
     def submit_answer(self) -> None:
-        if self.current is None:
+        if self.current is None or not self.submit_button.isEnabled():
             return
         guess = self.answer.text().strip().casefold()
         expected = self.current.word.casefold()
@@ -226,6 +226,17 @@ class SpellingBeeDialog(_GameDialog):
             self.feedback.setText(f"The answer was: {self.current.word}")
         self.submit_button.setEnabled(False)
         self.next_button.setEnabled(True)
+
+    def _answer_entered(self) -> None:
+        """Use Enter for the currently available spelling action.
+
+        This prevents a second Enter press from scoring the same word twice and
+        makes keyboard-only play follow Submit -> Next -> Submit naturally.
+        """
+        if self.submit_button.isEnabled():
+            self.submit_answer()
+        elif self.next_button.isEnabled():
+            self.next_word()
 
 
 class MathGameDialog(_GameDialog):
@@ -259,7 +270,7 @@ class MathGameDialog(_GameDialog):
         self.problem.setMinimumHeight(150)
         layout.addWidget(self.problem)
         self.answer = QLineEdit(); self.answer.setPlaceholderText("Enter your answer…")
-        self.answer.returnPressed.connect(self.submit_answer)
+        self.answer.returnPressed.connect(self._answer_entered)
         layout.addWidget(self.answer)
         actions = QHBoxLayout()
         self.start_button = QPushButton("Start"); self.start_button.clicked.connect(self.start_game)
@@ -310,7 +321,7 @@ class MathGameDialog(_GameDialog):
         self.submit_button.setEnabled(True); self.next_button.setEnabled(False)
 
     def submit_answer(self) -> None:
-        if self.answer_value is None:
+        if self.answer_value is None or not self.submit_button.isEnabled():
             return
         try:
             guess = float(self.answer.text().strip())
@@ -322,6 +333,13 @@ class MathGameDialog(_GameDialog):
         else:
             self.feedback.setText(f"The answer was {self.answer_value}.")
         self.submit_button.setEnabled(False); self.next_button.setEnabled(True)
+
+    def _answer_entered(self) -> None:
+        """Use Enter for Submit or Next without scoring a problem twice."""
+        if self.submit_button.isEnabled():
+            self.submit_answer()
+        elif self.next_button.isEnabled():
+            self.next_problem()
 
 
 class CognitiveGameDialog(QDialog):

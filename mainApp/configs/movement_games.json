@@ -2,7 +2,7 @@
   "version": 1,
   "featureSource": "AIHuMo processed feature Parquet",
   "games": [
-    {"id": "just_dance", "title": "Justice Dance", "category": "Dance", "rule": "rhythm", "description": "Use the shared movement engine for rhythm and dance drills.", "objective": "Match timing, repetition consistency, and movement quality.", "target_period_s": 0.75, "tolerance": 0.25},
+    {"id": "just_dance", "title": "Justice Dance", "category": "Dance", "rule": "dance", "description": "Use the shared movement engine for rhythm and dance drills.", "objective": "Match timing, repetition consistency, and movement quality.", "target_period_s": 0.75, "tolerance": 0.25},
     {"id": "target_grid_6", "title": "Target Grid", "category": "Coordination", "rule": "target_grid", "description": "Enter the highlighted zone with your body midpoint.", "objective": "Reach each target accurately and quickly.", "grid": [3, 2], "target_period_s": 1.5, "tolerance": 0.28},
     {"id": "target_grid_12", "title": "Target Grid 12", "category": "Coordination", "rule": "target_grid_12", "description": "A denser 4 by 3 target-grid challenge.", "objective": "Improve precision and reaction time.", "grid": [4, 3], "target_period_s": 1.25, "tolerance": 0.18},
     {"id": "mirror", "title": "Mirror Mode", "category": "Pose control", "rule": "mirror", "description": "Follow the reference movement with stable body position.", "objective": "Keep the replayed movement inside the pose tolerance."},

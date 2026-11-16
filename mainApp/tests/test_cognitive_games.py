@@ -34,6 +34,31 @@ def test_spelling_bee_uses_loaded_words_and_scores_answer(qt_app, tmp_path):
         dialog.submit_answer()
         assert dialog.correct == 1
         assert "Correct" in dialog.feedback.text()
+        dialog.submit_answer()
+        assert dialog.correct == 1
+    finally:
+        dialog.close()
+
+
+def test_spelling_bee_enter_submits_then_advances(qt_app):
+    dialog = SpellingBeeDialog()
+    try:
+        dialog.entries = (
+            WordEntry("motion", "The act of moving."),
+            WordEntry("rhythm", "A repeating pattern."),
+        )
+        dialog.difficulty.setCurrentText("Medium")
+        dialog.rounds.setValue(2)
+        dialog.start_game()
+        first = dialog.current
+        dialog.answer.setText(first.word)
+        dialog._answer_entered()
+        assert dialog.correct == 1
+        assert dialog.next_button.isEnabled()
+        dialog._answer_entered()
+        assert dialog.current is not first
+        assert dialog.round_number == 2
+        assert dialog.submit_button.isEnabled()
     finally:
         dialog.close()
 
@@ -51,8 +76,49 @@ def test_math_challenge_generates_all_operations_and_scores_answer(qt_app):
         dialog.answer.setText(str(dialog.answer_value))
         dialog.submit_answer()
         assert dialog.correct == 1
+        dialog.submit_answer()
+        assert dialog.correct == 1
     finally:
         dialog.close()
+
+
+def test_cognitive_game_buttons_and_enter_workflow_are_safe(qt_app, monkeypatch):
+    monkeypatch.setattr("app.cognitive_games.QFileDialog.getOpenFileName", lambda *args: ("", ""))
+
+    spelling = SpellingBeeDialog()
+    try:
+        spelling.entries = (WordEntry("motion", "The act of moving."),)
+        spelling.difficulty.setCurrentText("Medium")
+        spelling.rounds.setValue(1)
+        spelling.dictionary_button.click()
+        spelling.start_button.click()
+        spelling.answer.setText("motion")
+        spelling.submit_button.click()
+        assert spelling.correct == 1
+        spelling.next_button.click()
+        assert spelling.current is None
+        spelling.back_button.click()
+    finally:
+        spelling.close()
+
+    math = MathGameDialog()
+    try:
+        math.rounds.setValue(2)
+        math.start_button.click()
+        first_answer = math.answer_value
+        math.answer.setText(str(first_answer))
+        math._answer_entered()
+        assert math.correct == 1
+        math._answer_entered()
+        assert math.round_number == 2
+        math.answer.setText(str(math.answer_value))
+        math.submit_button.click()
+        assert math.correct == 2
+        math.next_button.click()
+        assert math.start_button.isEnabled()
+        math.back_button.click()
+    finally:
+        math.close()
 
 
 def test_hub_exposes_standalone_cognitive_games(qt_app):

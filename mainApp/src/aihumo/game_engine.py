@@ -382,7 +382,7 @@ class MovementGameEngine:
         if self.definition.rule == "path_follow":
             return self._path_target(index)
         if self.definition.rule in {
-            "mirror", "partner", "freeze_pose", "rhythm", "balance", "rehab", "ergonomics", "gait"
+            "mirror", "partner", "freeze_pose", "dance", "rhythm", "balance", "rehab", "ergonomics", "gait"
         }:
             return np.asarray((0.5, 0.5))
         return np.asarray(self.target(index), dtype=float)
@@ -397,23 +397,41 @@ class MovementGameEngine:
         slot_start = self.times[0] + slot * self.definition.target_period_s
         reaction = max(0.0, float(self.times[index] - slot_start)) if distance <= tolerance else None
 
-        if rule in {"target_grid", "target_grid_12", "reaction_targets"}:
+        if rule == "target_grid":
             score = 1.0 - distance / max(tolerance * 2, 1e-6)
             return score, distance <= tolerance, "Enter the highlighted target", reaction
+        if rule == "target_grid_12":
+            accuracy = max(0.0, 1.0 - distance / max(tolerance * 2, 1e-6))
+            score = accuracy ** 1.35
+            return score, distance <= tolerance, "Reach the precise twelve-zone target", reaction
+        if rule == "reaction_targets":
+            accuracy = max(0.0, 1.0 - distance / max(tolerance * 2, 1e-6))
+            response = max(0.0, 1.0 - (reaction or self.definition.target_period_s)
+                           / self.definition.target_period_s)
+            score = 0.65 * accuracy + 0.35 * response
+            return score, distance <= tolerance, "React before the target changes", reaction
         if rule == "sequence":
             expected = self._sequence_progress
             success = distance <= tolerance and slot >= expected
             return 1.0 - distance / max(tolerance * 2, 1e-6), success, "Follow the target sequence", reaction
-        if rule in {"avoid_zone", "obstacle_dodge"}:
+        if rule == "avoid_zone":
             success = distance >= tolerance
             return distance / max(tolerance * 2, 1e-6), success, "Stay outside the danger zone", None
+        if rule == "obstacle_dodge":
+            clearance = min(1.0, distance / max(tolerance * 2, 1e-6))
+            evasive_motion = min(1.0, self.signals.position_speed[index] / 1.5)
+            score = 0.75 * clearance + 0.25 * evasive_motion
+            return score, distance >= tolerance, "Dodge the incoming obstacle", None
         if rule == "path_follow":
             desired = self._path_target(index)
             error = float(np.linalg.norm(position - desired))
             return 1.0 - error / max(tolerance * 2, 1e-6), error <= tolerance, "Follow the moving path", None
-        if rule in {"mirror", "partner"}:
-            symmetry = self._symmetry_score(index)
-            return symmetry, symmetry >= 0.72, "Match left and right movement timing", None
+        if rule == "mirror":
+            symmetry = self._symmetry_score(index, use_partner=False)
+            return symmetry, symmetry >= 0.72, "Mirror left and right movement", None
+        if rule == "partner":
+            similarity = self._symmetry_score(index, use_partner=True)
+            return similarity, similarity >= 0.72, "Match the reference or partner timing", None
         if rule == "freeze_pose":
             pose_score = self._pose_score(index)
             stability = max(0.0, 1.0 - self.signals.position_speed[index] / 1.5)
@@ -425,6 +443,14 @@ class MovementGameEngine:
             movement = min(1.0, self.signals.position_speed[index] / 1.5)
             score = 0.55 * (1.0 - beat_distance * 2.0) + 0.45 * movement
             return score, score >= 0.65, "Move on the beat", None
+        if rule == "dance":
+            beat_phase = ((self.times[index] - self.times[0]) % self.definition.target_period_s) / self.definition.target_period_s
+            beat_distance = min(beat_phase, 1.0 - beat_phase)
+            timing = 1.0 - beat_distance * 2.0
+            movement = min(1.0, self.signals.position_speed[index] / 1.5)
+            coordination = self._symmetry_score(index, use_partner=False)
+            score = 0.40 * timing + 0.35 * movement + 0.25 * coordination
+            return score, score >= 0.68, "Dance on the beat with coordinated movement", None
         if rule == "balance":
             center_error = float(np.linalg.norm(position - np.asarray((0.5, 0.5))))
             sway = min(1.0, self.signals.position_speed[index] / 1.2)
@@ -462,8 +488,8 @@ class MovementGameEngine:
         error = float(np.nanmean(np.abs(self.signals.angles[index] - self._pose_reference)))
         return max(0.0, 1.0 - error / 45.0)
 
-    def _symmetry_score(self, index: int) -> float:
-        if self.partner_signals is not None:
+    def _symmetry_score(self, index: int, *, use_partner: bool = True) -> float:
+        if use_partner and self.partner_signals is not None:
             partner_index = int(np.clip(
                 np.searchsorted(self.partner_signals.times, self.times[index], side="left"),
                 0, len(self.partner_signals.times) - 1,

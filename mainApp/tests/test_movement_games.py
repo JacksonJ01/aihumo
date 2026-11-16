@@ -39,6 +39,10 @@ def test_game_catalog_contains_all_hub_modes():
         "rhythm", "obstacle", "sequence", "balance", "partner", "sports",
         "rehab", "ergonomics", "gait",
     }
+    assert len({game.id for game in games}) == len(games)
+    assert len({game.title for game in games}) == len(games)
+    assert len({game.rule for game in games}) == len(games)
+    assert all(game.description.strip() and game.objective.strip() for game in games)
 
 
 def test_all_game_rules_consume_one_shared_feature_table(tmp_path):
@@ -62,6 +66,38 @@ def test_all_game_rules_consume_one_shared_feature_table(tmp_path):
         assert len(result["position"]) == 2
 
 
+def test_every_game_handles_minimal_optional_features_without_nan():
+    frame = pd.DataFrame({
+        "_game_frame_id": [0, 1, 2],
+        "_game_time_s": [0.0, 0.1, 0.2],
+    })
+    for definition in load_game_definitions():
+        engine = MovementGameEngine(definition, frame)
+        for index in range(len(frame)):
+            result = engine.preview(index)
+            assert np.isfinite(result["score"]), definition.id
+            assert np.isfinite(result["average"]), definition.id
+            assert np.isfinite(result["position"]).all(), definition.id
+            assert np.isfinite(result["target"]).all(), definition.id
+
+
+def test_game_input_validation_fails_safely_and_confidence_masks_scores():
+    definition = load_game_definitions()[0]
+    with pytest.raises(ValueError, match="at least one"):
+        MovementGameEngine(definition, pd.DataFrame())
+    with pytest.raises(ValueError, match="strictly increasing"):
+        MovementGameEngine(definition, pd.DataFrame({
+            "_game_frame_id": [0, 1, 2],
+            "_game_time_s": [0.0, 0.1, 0.1],
+        }))
+    frame = game_frame(4)
+    frame["_game_time_s"] = frame["timestamp_s"]
+    frame["_game_frame_id"] = frame["frame_id"]
+    frame["pose_present"] = 0
+    engine = MovementGameEngine(definition, frame)
+    assert all(engine.preview(index)["score"] == 0 for index in range(len(frame)))
+
+
 def test_every_game_loop_runs_to_completion_and_exports_summary():
     frame = game_frame()
     frame["_game_time_s"] = frame["timestamp_s"]
@@ -82,6 +118,31 @@ def test_every_game_loop_runs_to_completion_and_exports_summary():
         assert 0 <= summary.success_rate <= 1
         assert summary.duration_s == pytest.approx(frame["timestamp_s"].iloc[-1])
         json.dumps(summary.to_document())
+
+
+def test_every_game_exposes_a_distinct_instruction_and_mechanic():
+    frame = game_frame()
+    frame["_game_time_s"] = frame["timestamp_s"]
+    frame["_game_frame_id"] = frame["frame_id"]
+    instructions = {}
+    scores = {}
+    for definition in load_game_definitions():
+        engine = MovementGameEngine(definition, frame, difficulty="medium", partner_frame=frame.copy())
+        result = engine.preview(50)
+        instructions[definition.id] = result["instruction"]
+        scores[definition.id] = result["score"]
+        assert result["state"] == LoopState.READY.value
+        assert len(result["position"]) == 2
+        assert len(result["target"]) == 2
+        assert isinstance(result["success"], bool)
+    assert len(set(instructions.values())) == len(instructions)
+    for family in (
+        ("just_dance", "rhythm"),
+        ("target_grid_6", "target_grid_12", "reaction"),
+        ("avoid", "obstacle"),
+        ("mirror", "partner"),
+    ):
+        assert len({scores[game_id] for game_id in family}) > 1, family
 
 
 def test_pause_seek_and_preview_do_not_duplicate_scores():
@@ -179,6 +240,48 @@ def test_every_game_dialog_renders_shared_canvas(qt_app):
             dialog.show()
             qt_app.processEvents()
             assert not dialog.canvas.grab().isNull(), definition.id
+        finally:
+            dialog.close()
+
+
+def test_every_game_dialog_control_loop_is_safe(qt_app, monkeypatch, tmp_path):
+    """Click each non-destructive control for every configured game mode."""
+    monkeypatch.setattr("app.movement_games.QFileDialog.getOpenFileName", lambda *args: ("", ""))
+    frame = game_frame(24)
+    frame["_game_time_s"] = frame["timestamp_s"]
+    frame["_game_frame_id"] = frame["frame_id"]
+    for definition in load_game_definitions():
+        dialog = MovementGameDialog(definition)
+        try:
+            dialog.engine = MovementGameEngine(definition, frame, partner_frame=frame.copy())
+            dialog.frame_slider.setRange(0, len(frame) - 1)
+            dialog.frame_slider.setEnabled(True)
+            dialog.load_button.click()
+            dialog.partner_button.click()
+            dialog.start_button.click()
+            assert dialog.engine.state in (LoopState.CALIBRATING, LoopState.RUNNING)
+            dialog.start_button.click()
+            assert dialog.engine.state == LoopState.PAUSED
+            dialog.start_button.click()
+            dialog.timer.stop()
+            dialog.next_frame()
+            dialog.timer.stop()
+            dialog.difficulty_combo.setCurrentIndex(2)
+            assert dialog.engine.difficulty == "medium"
+            dialog.frame_slider.setValue(8)
+            assert dialog.engine.index == 8
+            dialog.reset_button.click()
+            assert dialog.engine.state == LoopState.READY
+            assert dialog.start_button.text() == "Start"
+            result_path = tmp_path / f"{definition.id}.json"
+            monkeypatch.setattr(
+                "app.movement_games.QFileDialog.getSaveFileName",
+                lambda *args, path=result_path: (str(path), "JSON (*.json)"),
+            )
+            dialog.save_results_button.setEnabled(True)
+            dialog.save_results_button.click()
+            assert result_path.is_file()
+            dialog.back_button.click()
         finally:
             dialog.close()
 

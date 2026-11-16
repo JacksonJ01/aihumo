@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QButtonGroup, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout,
@@ -18,6 +19,8 @@ from .cognitive_games import CognitiveGameDialog
 from .movement_games import MovementGameDialog, load_game_definitions
 from .preferences import PreferenceStore, PreferencesDialog
 
+HUB_CARD_DIR = Path(__file__).resolve().parents[1] / "assets" / "hub_cards_v2"
+
 
 @dataclass(frozen=True)
 class HubApp:
@@ -26,6 +29,7 @@ class HubApp:
     subtitle: str
     description: str
     section: str
+    art: str = ""
     mode: int | None = None
     game_id: str | None = None
     cognitive_game_id: str | None = None
@@ -59,27 +63,27 @@ PIPELINE_APPS = (
     HubApp(
         "pipeline", "AIHuMo Pipeline", "Process · Annotate · Analyze",
         "Open the complete AIHuMo Data Studio launcher and choose any processing, annotation, alignment, or graph workflow.",
-        "Movement Analysis",
+        "Movement Analysis", art="pipeline.jpg",
     ),
     HubApp(
         "annotation", "Annotation Studio", "Mode 1 · Layered annotation",
         "Label activities, sets, repetitions, phases, form observations, notes, and synchronized frame context.",
-        "Movement Analysis", mode=1,
+        "Movement Analysis", art="annotation.jpg", mode=1,
     ),
     HubApp(
         "alignment", "Session Alignment", "Mode 2 · Multi-camera alignment",
         "Align related recordings and annotations across cameras, trimmed clips, and session timelines.",
-        "Movement Analysis", mode=2,
+        "Movement Analysis", art="alignment.jpg", mode=2,
     ),
     HubApp(
         "graph_2d", "Interactive Graph Viewer (2D)", "Mode 3 · Image-plane measurements",
         "Review synchronized skeleton video, 2D joint angles, landmark motion, distances, and annotation overlays.",
-        "Movement Analysis", mode=3,
+        "Movement Analysis", art="graph_2d.jpg", mode=3,
     ),
     HubApp(
         "graph_3d", "Interactive Graph Viewer (3D)", "Mode 4 · Estimated world measurements",
         "Inspect the rotatable pose and synchronized estimated-world timelines alongside the source video.",
-        "Movement Analysis", mode=4,
+        "Movement Analysis", art="graph_3d.jpg", mode=4,
     ),
 )
 
@@ -88,12 +92,12 @@ COGNITIVE_APPS = (
     HubApp(
         "spelling_bee", "Spelling Bee", "Words · Definitions · Recall",
         "Practice spelling from the AIHuMo dictionary with definitions, difficulty controls, rounds, and score feedback.",
-        "Cognitive Games", cognitive_game_id="spelling_bee",
+        "Cognitive Games", art="spelling_bee.jpg", cognitive_game_id="spelling_bee",
     ),
     HubApp(
         "math_challenge", "Math Challenge", "Arithmetic · Accuracy · Recall",
         "Solve addition, subtraction, multiplication, and division prompts with adjustable rounds and scoring.",
-        "Cognitive Games", cognitive_game_id="math_challenge",
+        "Cognitive Games", art="math_challenge.jpg", cognitive_game_id="math_challenge",
     ),
 )
 
@@ -120,21 +124,41 @@ def hub_apps() -> tuple[HubApp, ...]:
             definition.category,
             f"{definition.description} Objective: {definition.objective}",
             section,
+            art=f"{definition.id}.jpg",
             game_id=definition.id,
         ))
     return (*PIPELINE_APPS, *games, *COGNITIVE_APPS)
 
 
-class ThumbnailPlaceholder(QFrame):
-    """Reserved rectangular area for future app and session thumbnails."""
+class ThumbnailPlaceholder(QLabel):
+    """Card artwork, or a blank reserved area when no recent app exists."""
 
-    def __init__(self, parent=None):
+    def __init__(self, art: str = "", parent=None):
         super().__init__(parent)
         self.setObjectName("thumbnailPlaceholder")
-        self.setAccessibleName("Thumbnail placeholder")
+        self.image_path = HUB_CARD_DIR / art if art else None
+        self.source = QPixmap(str(self.image_path)) if self.image_path else QPixmap()
+        self.setAccessibleName("App artwork" if not self.source.isNull() else "Thumbnail placeholder")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(176, 104)
         self.setMaximumHeight(126)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._update_pixmap()
+
+    def resizeEvent(self, event):
+        self._update_pixmap()
+        super().resizeEvent(event)
+
+    def _update_pixmap(self) -> None:
+        if self.source.isNull() or self.width() <= 0 or self.height() <= 0:
+            return
+        scaled = self.source.scaled(
+            self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - self.width()) // 2)
+        y = max(0, (scaled.height() - self.height()) // 2)
+        self.setPixmap(scaled.copy(x, y, self.width(), self.height()))
 
 
 class RecentAppCard(QFrame):
@@ -146,7 +170,7 @@ class RecentAppCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(9)
-        layout.addWidget(ThumbnailPlaceholder())
+        layout.addWidget(ThumbnailPlaceholder(app.art if app else ""))
         title = QLabel(app.title if app else "No recent app yet", objectName="cardTitle")
         title.setWordWrap(True)
         layout.addWidget(title)
@@ -173,7 +197,7 @@ class AppDetailCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(9)
-        layout.addWidget(ThumbnailPlaceholder())
+        layout.addWidget(ThumbnailPlaceholder(app.art))
         title = QLabel(app.title, objectName="cardTitle")
         title.setWordWrap(True)
         layout.addWidget(title)
@@ -566,7 +590,7 @@ class MainHubDialog(QDialog):
             QLabel#categoryChip {{ color: {colors['accent']}; font-weight: 700; }}
             QLabel#footerText {{ color: {colors['muted']}; font-weight: 650; }}
             QFrame#hubFooter {{ border-top: 1px solid {colors['border']}; }}
-            QFrame#thumbnailPlaceholder {{ background: {colors['placeholder']}; border: 1px dashed {colors['border']}; border-radius: 12px; }}
+            QLabel#thumbnailPlaceholder {{ background: {colors['placeholder']}; border: 1px dashed {colors['border']}; border-radius: 12px; }}
             QFrame#recentAppCard, QFrame#appDetailCard {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 15px; }}
             QFrame#recentAppCard:hover, QFrame#appDetailCard:hover {{ border: 2px solid {colors['accent']}; }}
             QFrame#categorySection {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 14px; }}

@@ -3,6 +3,8 @@ from pathlib import Path
 from PyQt6.QtWidgets import QCheckBox, QLabel, QTabWidget
 
 from app.AIHuMoDataStudio import DesktopApplicationController, HomeWindow, MainHubDialog
+from app.main_hub import ThumbnailPlaceholder
+from app.movement_games import load_game_definitions
 from app.mode1_annotation import AnnotationDialog
 from app.preferences import DesktopPreferences, PreferenceStore, PreferencesDialog, StartupSetupDialog
 
@@ -136,6 +138,52 @@ def test_main_hub_exposes_pipeline_and_justice_dance_entries(qt_app):
         assert dialog.NAV_ITEMS == (
             "Home", "Movement Analysis", "Games", "Training", "Rehabilitation", "Cognitive Games"
         )
+        assert all(app.art for app in dialog.apps)
+        artwork = [item for item in dialog.findChildren(ThumbnailPlaceholder) if item.image_path]
+        assert artwork
+        assert all(item.image_path.is_file() and not item.source.isNull() for item in artwork)
+    finally:
+        dialog.close()
+
+
+def test_every_hub_app_button_launches_without_crashing(qt_app, tmp_path, monkeypatch):
+    movement_launches = []
+    cognitive_launches = []
+    pipeline_modes = []
+    pipeline_launches = []
+
+    class FakeMovementDialog:
+        def __init__(self, game_id, parent=None):
+            movement_launches.append(game_id)
+
+        def exec(self):
+            return 0
+
+    class FakeCognitiveDialog:
+        def __init__(self, game_id, parent=None):
+            cognitive_launches.append(game_id)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr("app.main_hub.MovementGameDialog", FakeMovementDialog)
+    monkeypatch.setattr("app.main_hub.CognitiveGameDialog", FakeCognitiveDialog)
+    dialog = MainHubDialog(
+        state_dir=tmp_path,
+        open_pipeline=lambda: pipeline_launches.append("pipeline"),
+        open_pipeline_mode=pipeline_modes.append,
+    )
+    try:
+        cards = [card for section in dialog.home_sections.values() for card in section.grid.cards]
+        assert len(cards) == len(dialog.apps)
+        for card in cards:
+            card.open_button.click()
+            qt_app.processEvents()
+        assert set(movement_launches) == {game.id for game in load_game_definitions()}
+        assert set(cognitive_launches) == {"spelling_bee", "math_challenge"}
+        assert pipeline_modes == [1, 2, 3, 4]
+        assert pipeline_launches == ["pipeline"]
+        assert len(dialog._recent_app_ids()) == 3
     finally:
         dialog.close()
 

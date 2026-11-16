@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 import cv2
-import mediapipe as mp
 import numpy as np
 import pandas as pd
 
@@ -15,6 +14,22 @@ from .tracking import TargetStatus, TargetTracker
 LOGGER = logging.getLogger(__name__)
 LANDMARK_COUNT = 33
 ProgressCallback = Callable[[float, str], None]
+_MEDIAPIPE = None
+
+
+def _mediapipe():
+    """Import MediaPipe only when pose processing actually starts.
+
+    MediaPipe imports its optional drawing stack, including Matplotlib. Keeping
+    that work out of module import makes the Hub and standalone cognitive games
+    start promptly without changing Mode 0 processing behavior.
+    """
+    global _MEDIAPIPE
+    if _MEDIAPIPE is None:
+        import mediapipe
+
+        _MEDIAPIPE = mediapipe
+    return _MEDIAPIPE
 
 
 class _GrowableFrameBuffer:
@@ -66,6 +81,7 @@ def _emit(callback: ProgressCallback | None, fraction: float, message: str) -> N
 
 
 def _make_landmarker(model_path: str | Path, cfg: dict):
+    mp = _mediapipe()
     options = mp.tasks.vision.PoseLandmarkerOptions(
         base_options=mp.tasks.BaseOptions(model_asset_path=str(model_path)),
         running_mode=mp.tasks.vision.RunningMode.VIDEO,
@@ -215,6 +231,7 @@ def iter_landmark_rows(
     try:
         if start_frame and not cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame):
             raise RuntimeError(f"Could not seek to checkpoint frame {start_frame}: {video_path}")
+        mp = _mediapipe()
         with _make_landmarker(model_path, pose_cfg) as landmarker:
             frame_idx = start_frame
             last_timestamp_s = previous_timestamp_s
