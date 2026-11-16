@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from PyQt6.QtCore import QPoint, QPointF, Qt
 from PyQt6.QtWidgets import QCheckBox, QLabel, QTabWidget
 
 from app.AIHuMoDataStudio import DesktopApplicationController, HomeWindow, MainHubDialog
@@ -202,6 +203,57 @@ def test_all_apps_carousel_loops_without_changing_visible_count(qt_app):
         dialog.close()
 
 
+def test_carousel_hover_translates_but_vertical_wheel_passes_to_page(qt_app):
+    dialog = MainHubDialog()
+    try:
+        carousel = dialog.all_apps_carousel
+
+        class HoverEvent:
+            def __init__(self, x):
+                self._position = QPointF(x, 100)
+                self.accepted = False
+
+            def position(self):
+                return self._position
+
+            def buttons(self):
+                return Qt.MouseButton.NoButton
+
+            def accept(self):
+                self.accepted = True
+
+        carousel._hover_x = 100
+        start = carousel._position
+        hover = HoverEvent(240)
+        carousel.mouseMoveEvent(hover)
+        assert hover.accepted
+        assert carousel._position < start
+
+        class WheelEvent:
+            def __init__(self, x, y):
+                self._delta = QPoint(x, y)
+                self.accepted = None
+
+            def angleDelta(self):
+                return self._delta
+
+            def accept(self):
+                self.accepted = True
+
+            def ignore(self):
+                self.accepted = False
+
+        vertical = WheelEvent(0, -120)
+        carousel.wheelEvent(vertical)
+        assert vertical.accepted is False
+        horizontal = WheelEvent(-120, 0)
+        carousel.wheelEvent(horizontal)
+        assert horizontal.accepted is True
+        carousel._animation.stop()
+    finally:
+        dialog.close()
+
+
 def test_hub_search_uses_game_keywords_and_relevance_order(qt_app):
     dialog = MainHubDialog()
     try:
@@ -282,6 +334,8 @@ def test_main_hub_supports_light_and_dark_without_galaxy(qt_app, tmp_path):
             assert "QTabBar::tab:selected" in stylesheet
             assert "QComboBox QAbstractItemView::item:selected" in stylesheet
             assert "QToolTip" in stylesheet
+            assert "QScrollBar::handle:vertical:hover" in stylesheet
+            assert ("#7894bd" if theme == "Dark" else "#a8b6ca") in stylesheet
         assert not hasattr(dialog, "galaxy")
         assert not hasattr(dialog, "galaxy_toggle")
     finally:

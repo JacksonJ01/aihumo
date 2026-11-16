@@ -249,6 +249,7 @@ class PerspectiveAppCarousel(QWidget):
         self._press_point: QPointF | None = None
         self._press_position = 0.0
         self._dragged = False
+        self._hover_x: float | None = None
         self._last_emitted_index = 0
         self._sources = {
             app.id: QPixmap(str(HUB_CARD_DIR / app.art)) if app.art else QPixmap()
@@ -483,6 +484,19 @@ class PerspectiveAppCarousel(QWidget):
             self._set_position(self._press_position - delta / max(1.0, spacing))
             event.accept()
             return
+        if event.buttons() == Qt.MouseButton.NoButton:
+            x = event.position().x()
+            if self._hover_x is None:
+                self._hover_x = x
+            else:
+                delta = x - self._hover_x
+                self._hover_x = x
+                if abs(delta) >= 0.5:
+                    self._animation.stop()
+                    spacing = self._metrics()[2]
+                    self._set_position(self._position - delta / max(1.0, spacing * 1.35))
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -501,14 +515,34 @@ class PerspectiveAppCarousel(QWidget):
                     else:
                         self.set_current_index(selected)
             self._press_point = None
+            self._hover_x = point.x()
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:
-        delta = event.angleDelta().y() or event.angleDelta().x()
-        self.set_current_index(self.current_index + (1 if delta < 0 else -1))
-        event.accept()
+        horizontal = event.angleDelta().x()
+        vertical = event.angleDelta().y()
+        if horizontal and abs(horizontal) >= abs(vertical):
+            if horizontal > 0:
+                self.previous()
+            else:
+                self.next()
+            event.accept()
+            return
+        # The carousel sits inside the Hub's vertical scroll area. Ignoring a
+        # vertical wheel gesture lets Qt pass it to that parent scroll area.
+        event.ignore()
+
+    def enterEvent(self, event) -> None:
+        self._hover_x = None
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover_x = None
+        if self._press_point is None and self.apps:
+            self.set_current_index(self.current_index)
+        super().leaveEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Left:
@@ -972,13 +1006,13 @@ class MainHubDialog(QDialog):
             colors = {
                 "window": "#091426", "panel": "#101d33", "card": "#16263f", "text": "#f5f7ff",
                 "muted": "#b7c2d8", "border": "#354967", "accent": "#36c9d8", "accent2": "#7867ef",
-                "placeholder": "#0c192c",
+                "placeholder": "#0c192c", "scroll": "#7894bd", "scroll_hover": "#36c9d8",
             }
         else:
             colors = {
                 "window": "#f5f7fb", "panel": "#ffffff", "card": "#ffffff", "text": "#15213d",
                 "muted": "#63708a", "border": "#dce2ed", "accent": "#22bdd1", "accent2": "#7563e7",
-                "placeholder": "#eef2f7",
+                "placeholder": "#eef2f7", "scroll": "#a8b6ca", "scroll_hover": "#22bdd1",
             }
         return f"""
             QDialog, QWidget#hubBody {{ background: {colors['window']}; color: {colors['text']}; font-family: "Segoe UI"; }}
@@ -1022,6 +1056,11 @@ class MainHubDialog(QDialog):
             QToolTip {{ color: {colors['text']}; background: {colors['card']}; border: 1px solid {colors['accent']}; padding: 5px; }}
             QScrollArea {{ border: none; background: {colors['window']}; }}
             QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px; }}
-            QScrollBar::handle:vertical {{ background: {colors['border']}; min-height: 40px; border-radius: 5px; }}
+            QScrollBar::handle:vertical {{ background: {colors['scroll']}; min-height: 40px; border-radius: 5px; }}
+            QScrollBar::handle:vertical:hover {{ background: {colors['scroll_hover']}; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 3px; }}
+            QScrollBar::handle:horizontal {{ background: {colors['scroll']}; min-width: 40px; border-radius: 5px; }}
+            QScrollBar::handle:horizontal:hover {{ background: {colors['scroll_hover']}; }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
         """
