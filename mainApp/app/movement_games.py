@@ -106,7 +106,10 @@ class GameCanvas(QWidget):
         danger = rule in {"avoid_zone", "obstacle_dodge"}
         target_color = QColor("#ef4444" if danger else "#f59e0b")
         painter.setPen(QPen(target_color, 4))
-        painter.setBrush(QBrush(target_color.red(), target_color.green(), target_color.blue(), 70))
+        # QBrush accepts a QColor, not four RGBA channel arguments. Keeping
+        # alpha construction inside QColor makes this valid across PyQt6
+        # versions and protects every game that shares this canvas.
+        painter.setBrush(QBrush(QColor(target_color.red(), target_color.green(), target_color.blue(), 70)))
         painter.drawRect(target_rect)
         position = self.state.get("position", (0.5, 0.5))
         point = (int(position[0] * width), int(position[1] * height))

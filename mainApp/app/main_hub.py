@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+import textwrap
 from typing import Callable
 
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt
-from PyQt6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -161,12 +162,16 @@ class RecentCard(QFrame):
         title = QLabel(record["title"])
         title.setObjectName("recentTitle")
         title.setStyleSheet("font-weight: 700; font-size: 16px;")
+        title.setWordWrap(True)
         details.addWidget(title)
         file_label = QLabel(record["file"])
         file_label.setObjectName("mutedText")
         file_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        file_label.setWordWrap(True)
         details.addWidget(file_label)
-        details.addWidget(QLabel(record["detail"], objectName="mutedText"))
+        detail_label = QLabel(record["detail"], objectName="mutedText")
+        detail_label.setWordWrap(True)
+        details.addWidget(detail_label)
         layout.addLayout(details, 1)
         status = QLabel(record["status"])
         status.setObjectName("statusChip")
@@ -184,12 +189,14 @@ class AppCard(QToolButton):
         super().__init__(parent)
         self.app = app
         self.setObjectName("appCard")
-        self.setText(f"{app.title}\n{app.section}")
+        title_lines = textwrap.wrap(app.title, width=22, break_long_words=False, break_on_hyphens=False)
+        wrapped_title = "\n".join(title_lines)
+        self.setText(wrapped_title + "\n" + app.section)
         self.setToolTip(f"{app.subtitle}\nClick to open {app.title}.")
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.setIcon(QIcon(str(hub_art_path(app.art))))
         self.setIconSize(QSize(148, 148))
-        self.setMinimumHeight(218)
+        self.setMinimumHeight(232)
         # Ignore long subtitle size hints so the responsive grid can contract
         # without creating a horizontal page scrollbar.
         self.setMinimumWidth(0)
@@ -206,21 +213,44 @@ class AppGrid(QWidget):
     def __init__(self, apps: tuple[HubApp, ...], launch: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
         self.cards: list[AppCard] = []
-        grid = QGridLayout(self)
-        grid.setContentsMargins(8, 8, 8, 8)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(14)
-        for index, app in enumerate(apps):
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(8, 8, 8, 8)
+        self.grid.setHorizontalSpacing(14)
+        self.grid.setVerticalSpacing(14)
+        self._columns = 0
+        for app in apps:
             card = AppCard(app, launch)
             self.cards.append(card)
-            grid.addWidget(card, index // 4, index % 4)
-        for column in range(4):
-            grid.setColumnStretch(column, 1)
+        self._reflow(4)
 
     def filter(self, query: str) -> None:
         query = query.casefold().strip()
         for card in self.cards:
             card.setVisible(not query or query in f"{card.app.title} {card.app.subtitle} {card.app.section}".casefold())
+        self._reflow()
+
+    def resizeEvent(self, event):
+        self._reflow()
+        super().resizeEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reflow()
+
+    def _reflow(self, columns: int | None = None) -> None:
+        if columns is None:
+            columns = max(1, min(4, max(1, self.width()) // 260))
+        visible = [card for card in self.cards if card.isVisible()]
+        if columns == self._columns and self.grid.count() == len(visible):
+            return
+        for card in self.cards:
+            self.grid.removeWidget(card)
+        for index, card in enumerate(visible):
+            self.grid.addWidget(card, index // columns, index % columns)
+        for column in range(4):
+            self.grid.setColumnStretch(column, 1 if column < columns else 0)
+        self._columns = columns
+        self.updateGeometry()
 
 
 class BubbleButton(QPushButton):
@@ -250,9 +280,22 @@ class BubbleButton(QPushButton):
         self.caption.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.caption.setStyleSheet(
             "color: white; background: rgba(4, 12, 30, 175); border-radius: 9px; "
-            "font-family: 'Segoe UI'; font-weight: 700; padding: 4px;"
+            "padding: 4px;"
         )
-        self.caption.setGeometry(12, int(diameter * 0.57), diameter - 24, int(diameter * 0.30))
+        self.caption.setGeometry(6, int(diameter * 0.45), diameter - 12, int(diameter * 0.47))
+        self._fit_caption_font()
+
+    def _fit_caption_font(self) -> None:
+        available = self.caption.rect().adjusted(8, 6, -8, -6)
+        maximum = 12 if self.diameter >= 170 else 11 if self.diameter >= 145 else 10
+        flags = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
+        for point_size in range(maximum, 6, -1):
+            font = QFont("Segoe UI", point_size, QFont.Weight.Bold)
+            bounds = QFontMetrics(font).boundingRect(available, flags, self.app.title)
+            if bounds.height() <= available.height() and bounds.width() <= available.width():
+                self.caption.setFont(font)
+                return
+        self.caption.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
 
     def _circular_icon(self) -> QIcon:
         side = self.diameter - 12
@@ -281,7 +324,7 @@ class GalaxyWidget(QWidget):
         self.bubbles: list[BubbleButton] = []
         self.setMinimumHeight(720)
         for app in apps:
-            diameter = 174 if app.id == "pipeline" else 142 if app.featured else 112
+            diameter = 190 if app.id == "pipeline" else 164 if app.featured else 156
             self.bubbles.append(BubbleButton(app, launch, diameter, self))
 
     def set_dark(self, dark: bool) -> None:
@@ -308,9 +351,9 @@ class GalaxyWidget(QWidget):
     def _arrange_bubbles(self) -> None:
         visible = [bubble for bubble in self.bubbles if bubble.isVisible()]
         width = max(700, self.width())
-        columns = max(4, min(7, width // 190))
+        columns = max(3, min(7, width // 205))
         cell_w = width / columns
-        row_h = 170
+        row_h = 200
         for index, bubble in enumerate(visible):
             row, column = divmod(index, columns)
             offset = cell_w * 0.22 if row % 2 else 0
@@ -377,6 +420,8 @@ class MainHubDialog(QDialog):
         self.setWindowTitle("AIHuMo Main Hub")
         self.resize(1320, 820)
         self.filterables: list[AppGrid | GalaxyWidget] = []
+        self.category_descriptions: dict[str, QLabel] = {}
+        self.category_grids: dict[str, AppGrid] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -489,9 +534,15 @@ class MainHubDialog(QDialog):
             "Games": "Reaction, rhythm, coordination, social, and movement-play experiences.",
             "Training & Rehab": "Controlled balance, mobility, rehabilitation, gait, and ergonomic workspaces.",
         }[section]
-        layout.addWidget(QLabel(description, objectName="mutedText"))
+        description_label = QLabel(description, objectName="categoryDescription")
+        description_label.setWordWrap(True)
+        description_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        description_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(description_label)
+        self.category_descriptions[section] = description_label
         apps = tuple(app for app in self.apps if app.section == section)
         grid = AppGrid(apps, self._launch_app)
+        self.category_grids[section] = grid
         self.filterables.append(grid)
         layout.addWidget(grid)
         layout.addStretch(1)

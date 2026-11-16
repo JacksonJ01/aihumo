@@ -164,6 +164,25 @@ def test_desktop_game_controls_drive_backend_loop(qt_app):
         dialog.close()
 
 
+def test_every_game_dialog_renders_shared_canvas(qt_app):
+    """Exercise the Qt paint path used by every configured game mode."""
+    frame = game_frame(12)
+    frame["_game_time_s"] = frame["timestamp_s"]
+    frame["_game_frame_id"] = frame["frame_id"]
+    for definition in load_game_definitions():
+        dialog = MovementGameDialog(definition)
+        try:
+            dialog.engine = MovementGameEngine(definition, frame)
+            dialog.frame_slider.setRange(0, len(frame) - 1)
+            dialog.frame_slider.setEnabled(True)
+            dialog.render_frame(0)
+            dialog.show()
+            qt_app.processEvents()
+            assert not dialog.canvas.grab().isNull(), definition.id
+        finally:
+            dialog.close()
+
+
 def test_feature_pair_resolves_processed_skeleton_video(tmp_path):
     recording = tmp_path / "S001" / "clip"
     parquet = recording / "parquet" / "clip_features.parquet"

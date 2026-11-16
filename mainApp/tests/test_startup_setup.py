@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import QCheckBox, QTabWidget
 
 from app.AIHuMoDataStudio import DesktopApplicationController, HomeWindow, MainHubDialog
@@ -175,6 +177,31 @@ def test_galaxy_apps_are_arranged_without_overlap(qt_app, tmp_path):
         positions = {(bubble.x(), bubble.y()) for bubble in dialog.galaxy.bubbles}
         assert len(positions) == len(dialog.galaxy.bubbles)
         assert not dialog.home_scroll.horizontalScrollBar().isVisible()
+    finally:
+        dialog.close()
+
+
+def test_hub_text_wraps_and_grids_reflow(qt_app, tmp_path):
+    dialog = MainHubDialog(state_dir=tmp_path)
+    try:
+        dialog.resize(820, 720)
+        dialog.show()
+        qt_app.processEvents()
+        assert all(label.wordWrap() for label in dialog.category_descriptions.values())
+        for grid in dialog.category_grids.values():
+            grid.resize(700, grid.height())
+            grid._reflow()
+            assert grid._columns == 2
+        for bubble in dialog.galaxy.bubbles:
+            assert bubble.caption.wordWrap()
+            available = bubble.caption.rect().adjusted(8, 6, -8, -6)
+            bounds = QFontMetrics(bubble.caption.font()).boundingRect(
+                available,
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                bubble.app.title,
+            )
+            assert bounds.height() <= available.height()
+            assert bounds.width() <= available.width()
     finally:
         dialog.close()
 
