@@ -34,6 +34,7 @@ from .preferences import (
 )
 from .app_paths import default_processed_root, user_data_dir
 from .quality_review import QualityReviewDialog
+from .movement_atlas import MovementAtlasWindow
 from .processing_resume import processing_fields
 from .main_hub import MainHubDialog
 from .branding import (
@@ -128,6 +129,7 @@ class HomeWindow(QMainWindow):
         self.graph_window = None
         self._graph_mode = 3
         self.alignment_window = None
+        self.atlas_window = None
         self._using_default_state = state_dir is None
         self.processed_root = processed_root if processed_root is not None else default_processed_root()
         state_dir = state_dir if state_dir is not None else user_data_dir()
@@ -137,8 +139,9 @@ class HomeWindow(QMainWindow):
         self.recent_alignments = RecentWorkStore(state_dir / "recent_alignments.json", identity_keys=("alignmentJson",))
         self.recent_processing = RecentWorkStore(state_dir / "recent_processing.json",
                                                  identity_keys=("sourceVideo", "batchFolders", "outputRoot", "jobId"))
+        self.recent_atlas = RecentWorkStore(state_dir / "recent_atlas.json", identity_keys=("manifest",))
         self.resume_stores = {0: self.recent_processing, 1: self.recent_work, 2: self.recent_alignments,
-                              3: self.recent_graphs, 4: self.recent_poses}
+                              3: self.recent_graphs, 4: self.recent_poses, 5: self.recent_atlas}
         self._selected_mode = 1
         self.preferences = preferences or PreferenceStore(state_dir / "settings.json")
         self.setStyleSheet(subapp_stylesheet(self.preferences.values.theme))
@@ -186,7 +189,7 @@ class HomeWindow(QMainWindow):
         self.alignment_button.setToolTip("Mode 2 Annotation Alignment and Trim 2 Sub Videos")
         self.viewer_button = ModeTile("Interactive Graph Viewer (2D)\nMode 3")
         self.pose_button = ModeTile("Interactive Graph Viewer (3D)\nMode 4")
-        self.model_button = ModeTile("Model Suite\nMode 5 — Coming Soon")
+        self.model_button = ModeTile("Movement Atlas\nMode 5")
         self.workflows = QButtonGroup(self)
         self.workflows.setExclusive(True)
         for mode, button in enumerate((self.processing_card.face, self.annotate_button, self.alignment_button,
@@ -241,7 +244,7 @@ class HomeWindow(QMainWindow):
             "Mode 2 — Align and review multiple cameras on one timeline.\n"
             "Mode 3 — Inspect synchronized joint angles and landmark graphs.\n"
             "Mode 4 — Rotate the saved 3D pose or inspect its 2D projections.\n"
-            "Mode 5 — Planned model training and inference."
+            "Mode 5 — Movement Atlas: confirmed repetitions, PCA encodings, and interpretable similarity."
         )
         workflow.setWordWrap(True)
         layout.addWidget(workflow)
@@ -683,6 +686,9 @@ class HomeWindow(QMainWindow):
     def _clear_alignment_window(self):
         self.alignment_window = None
 
+    def _clear_atlas_window(self, *_args):
+        self.atlas_window = None
+
     def _remember_alignment(self, path):
         try:
             self.recent_alignments.add(name=f"{path.parent.name} / {path.stem}",
@@ -693,21 +699,21 @@ class HomeWindow(QMainWindow):
             LOGGER.exception("Could not save the alignment bookmark")
 
     def open_model_suite(self):
-        """Show the planned model families without pretending they are wired."""
+        """Open the interpretable PCA Movement Atlas (Mode 5)."""
         self._select_mode(5)
-        QMessageBox.information(
-            self,
-            "Mode 5 — Model Suite",
-            "The model-training and inference pipeline is not connected yet.\n\n"
-            "Planned interchangeable model families:\n"
-            "• 1D CNN\n"
-            "• Temporal Convolutional Network (TCN)\n"
-            "• LSTM\n"
-            "• Spatio-Temporal Graph Convolutional Network (ST-GCN)\n"
-            "• Graph Convolutional Network (GCN)\n"
-            "• Deep Neural Network (DNN)\n\n"
-            "This button is a navigation placeholder for the future Mode 5 Model Suite.",
-        )
+        if self.atlas_window is None:
+            self.atlas_window = MovementAtlasWindow(self.processed_root, self)
+            self.atlas_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            self.atlas_window.destroyed.connect(self._clear_atlas_window)
+            manifest = getattr(self.atlas_window, "manifest_path", None)
+            if manifest:
+                try:
+                    self.recent_atlas.add(name=f"Movement Atlas / {manifest.parent.parent.name}", files={"manifest": str(manifest.resolve())})
+                    self._refresh_resume()
+                except OSError:
+                    LOGGER.exception("Could not save the Movement Atlas bookmark")
+        self.atlas_window.showMaximized()
+        self._activate_review(self.atlas_window)
 
     def open_quality_review(self):
         dialog = QualityReviewDialog(self)
@@ -777,6 +783,17 @@ class HomeWindow(QMainWindow):
                 self.open_batch(setup=item)
             else:
                 QMessageBox.warning(self, "Processing setup unavailable", "The saved source video or session folder no longer exists.")
+        elif mode == 5:
+            manifest = Path(item.get("files", {}).get("manifest", ""))
+            if not manifest.is_file():
+                QMessageBox.warning(self, "Movement Atlas unavailable", "The saved Movement Atlas manifest no longer exists.")
+                return
+            if self.atlas_window is None:
+                self.atlas_window = MovementAtlasWindow(self.processed_root, self)
+            self.atlas_window.manifest_path = manifest
+            self.atlas_window._reload()
+            self.atlas_window.showMaximized()
+            self._activate_review(self.atlas_window)
 
     def resume_graph_work(self, *, mode=3):
         self._select_mode(mode)

@@ -41,6 +41,8 @@ from aihumo.config import load_config
 from aihumo.features import CROSS_MEAN_PREFIX, LEGACY_ANGLE_PREFIX, MEAN_ANGLE_PREFIX, PROJECTED_ANGLE_PREFIX, TORSO_ANGLE_PREFIX, WORLD_ANGLE_PREFIX
 from aihumo.rep_detection import RepDetector, save_rep_suggestions
 from aihumo.annotation_suggestions import update_suggestion_review
+from aihumo.movement_encoding import EncodingConfig, export_movement_encodings
+from aihumo.exercise_mapping import ExerciseRegistry, rank_exercises
 from aihumo.storage import annotation_json_for_features, load_json, save_json_atomic
 from aihumo.exercise_library import (
     exercise_options,
@@ -58,6 +60,7 @@ from .preferences import DEFAULT_FRAME_JUMP, MAX_FRAME_JUMP, PreferencesDialog
 from .subapp_style import subapp_stylesheet
 from .trim_subvideos import TrimSubVideosDialog
 from .suggestion_review import SuggestionReviewDialog
+from .exercise_mapping_review import ExerciseMappingReviewDialog
 
 LOGGER = logging.getLogger("AIHuMoDataStudio.Mode1")
 
@@ -1095,6 +1098,9 @@ class AnnotationStudio(ReviewWindow):
         table_header.addWidget(QLabel("Temporal annotations"), 1)
         self.review_suggestions_button = QPushButton("Review suggestions…", clicked=self.open_suggestion_review)
         table_header.addWidget(self.review_suggestions_button)
+        self.map_exercise_button = QPushButton("Suggest exercise…", clicked=self.open_exercise_mapping)
+        self.map_exercise_button.setToolTip("Rank existing exercise IDs using saved trajectories and distances. Results remain provisional.")
+        table_header.addWidget(self.map_exercise_button)
         self.show_all_annotation_layers = QCheckBox("Show all layers")
         self.show_all_annotation_layers.setToolTip("Show the full table or only rows for the editor's current layer.")
         table_header.addWidget(self.show_all_annotation_layers)
@@ -1135,6 +1141,13 @@ class AnnotationStudio(ReviewWindow):
         buttons = QHBoxLayout()
         buttons.addWidget(QPushButton("Save (Ctrl+S)", clicked=self.save_annotations))
         buttons.addWidget(QPushButton("Mark session complete", clicked=self.mark_session_complete))
+        self.generate_movement_encoding = QCheckBox("Generate Movement Encoding Data for Mode 5")
+        self.generate_movement_encoding_checkbox = self.generate_movement_encoding
+        self.generate_movement_encoding.setToolTip(
+            "After successful completion, export confirmed repetitions and PCA metrics to movement_atlas/."
+        )
+        self.generate_movement_encoding.setChecked(False)
+        buttons.addWidget(self.generate_movement_encoding)
         right_layout.addLayout(buttons)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 3)
@@ -1196,6 +1209,36 @@ class AnnotationStudio(ReviewWindow):
         self._suggestion_dialog.exec()
         self._suggestion_dialog = None
         self._refresh_suggestion_button()
+
+    def open_exercise_mapping(self) -> None:
+        """Show ranked exercise IDs for the selected active interval."""
+        active = [item for item in self.annotations
+                  if item.get("annotation_type") == "activity_state"
+                  and item.get("activity_state") == "active"
+                  and int(item.get("start_frame", 0)) <= self.current_frame <= int(item.get("end_frame", -1))]
+        # Mode 1 keeps a deliberately small display DataFrame. Mapping is an
+        # explicit user action, so read the full saved feature table here to
+        # include distances and trajectory derivatives without adding them to
+        # every playback refresh.
+        try:
+            segment = pd.read_parquet(self.parquet_path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Exercise mapping", f"Could not read the saved feature table.\n\n{exc}")
+            return
+        interval = None
+        if active:
+            interval = (int(active[-1]["start_frame"]), int(active[-1]["end_frame"]))
+        registry_path = PROJECT_ROOT / "configs" / "exercise_signatures.json"
+        suggestions = rank_exercises(segment, ExerciseRegistry.from_existing(registry_path), interval=interval, top_k=8)
+        if not suggestions:
+            QMessageBox.information(self, "Exercise mapping", "There is not enough saved feature data to rank an exercise.")
+            return
+        def use(suggestion):
+            self.editor_exercise_selector.set_value(suggestion.exercise_id)
+            self.annotation_status.setText(
+                f"Provisional exercise suggestion: {suggestion.name}. Review the fields and press S to save it."
+            )
+        ExerciseMappingReviewDialog(suggestions, on_accept=use, parent=self).exec()
 
     def _goto_suggestion(self, suggestion: dict) -> bool:
         return self.goto_frame(int(suggestion["start_frame"]))
@@ -2582,6 +2625,27 @@ class AnnotationStudio(ReviewWindow):
         if self._persist_annotations(show_error=True):
             self._refresh_summary()
             self.annotation_status.setText("Annotation session marked complete.")
+            if self.generate_movement_encoding.isChecked():
+                try:
+                    result = export_movement_encodings(
+                        self.parquet_path,
+                        self.annotation_json_path,
+                        config=EncodingConfig(sample_points=32, feature_group="angles_distances_motion"),
+                    )
+                    self.annotation_status.setText(
+                        "Annotation session marked complete. "
+                        f"Movement Atlas updated ({result['encoding_count']} encoding(s))."
+                    )
+                except Exception as exc:
+                    # Completion is authoritative and must not be rolled back
+                    # because a derived Mode 5 export failed.
+                    LOGGER.exception("Movement encoding export failed after completion")
+                    QMessageBox.warning(
+                        self,
+                        "Movement encoding warning",
+                        "The annotation session was completed, but the optional Mode 5 export failed.\n\n"
+                        f"{type(exc).__name__}: {exc}",
+                    )
 
     def analyze_current_active_segment(self):
         self.playback.pause()

@@ -17,6 +17,12 @@ def main() -> int:
         sys.argv = [sys.argv[0], *sys.argv[2:]]
         return int(prepare_main() or 0)
 
+    if len(sys.argv) > 1 and sys.argv[1] == "--export-movement-encoding":
+        from scripts.export_movement_encoding import main as export_main
+
+        sys.argv = [sys.argv[0], *sys.argv[2:]]
+        return int(export_main() or 0)
+
     if len(sys.argv) > 1 and sys.argv[1] == "--smoke-test":
         root = Path(__file__).resolve().parent
         required = (

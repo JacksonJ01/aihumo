@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "1.0",
+  "signatures": [
+    {
+      "exerciseId": "biceps_curl",
+      "family": "pull",
+      "primary_joints": ["elbow", "wrist"],
+      "secondary_joints": ["shoulder"],
+      "angle_patterns": ["*elbow", "*shoulder"],
+      "landmark_patterns": ["*wrist", "*elbow"],
+      "distance_patterns": ["*shoulder_to_wrist", "*wrist_to_wrist"],
+      "motion_patterns": ["*wrist*velocity", "*elbow*velocity"],
+      "coordination": ["elbow flexion with limited shoulder elevation"],
+      "distinguishing": ["elbow flexion is large while shoulder and torso trajectories remain comparatively stable"]
+    },
+    {
+      "exerciseId": "shoulder_press",
+      "family": "push",
+      "primary_joints": ["shoulder", "elbow", "wrist"],
+      "secondary_joints": ["torso"],
+      "angle_patterns": ["*shoulder", "*elbow"],
+      "landmark_patterns": ["*wrist", "*shoulder"],
+      "distance_patterns": ["*shoulder_to_wrist", "*wrist_to_wrist"],
+      "motion_patterns": ["*wrist*velocity", "*shoulder*velocity"],
+      "coordination": ["wrist and shoulder elevation are phase-locked"],
+      "distinguishing": ["wrist height and shoulder elevation change together, unlike a curl"]
+    }
+  ]
+}

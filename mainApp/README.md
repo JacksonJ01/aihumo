@@ -128,6 +128,33 @@ Feature Parquet is input data only. Annotation JSON is the ground-truth source o
 
 Activity state is annotated manually. Repetition detection is currently a deterministic, human-reviewable suggestion tool rather than an automatic source of truth.
 
+## Movement mapping and Mode 5
+
+Mode 1 includes a provisional **Suggest exercise…** action. It compares the
+selected active interval against the stable IDs in `exercise_library.py` and
+the optional `configs/exercise_signatures.json` registry using saved angle,
+normalised landmark, distance, velocity, acceleration, and temporal features.
+Suggestions are evidence-backed and must be loaded into the editor and saved
+by a human before they become annotations.
+
+Selecting **Generate Movement Encoding Data for Mode 5** beside **Mark session
+complete** exports confirmed repetition ranges to a new
+`movement_atlas/movement_encoding_manifest.json`. Source Parquets and
+`annotations.json` are never overwritten. The exporter resamples each rep to
+32 points by default (64 is supported), evaluates angle, angle+distance, and
+angle+distance+motion feature groups with SVD-PCA, records explained variance,
+reconstruction error, nearest-neighbour retrieval accuracy, durations, frame
+ranges, and source paths, and deduplicates exports by a content fingerprint.
+
+Mode 5 opens the **Movement Atlas**, a filterable 2D/3D PCA view of the saved
+repetitions. The same export can also be run headlessly:
+
+```powershell
+.\.venv\Scripts\python.exe main.py --export-movement-encoding `
+  --parquet path\to\video_features.parquet `
+  --annotations path\to\video_annotations.json
+```
+
 ## Repository
 
 ```text
