@@ -12,13 +12,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -28,6 +29,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .preferences import DesktopPreferences, PreferenceStore, PreferencesDialog
+from .subapp_style import subapp_stylesheet
 
 
 WORD_RE = re.compile(r"^[A-Za-z]+(?:'[A-Za-z]+)?$")
@@ -82,20 +86,46 @@ def _difficulty_bounds(label: str) -> tuple[int, int]:
 
 
 class _GameDialog(QDialog):
+    def __init__(self, parent=None, *, preferences: DesktopPreferences | PreferenceStore | None = None):
+        super().__init__(parent)
+        self.preference_store = preferences if isinstance(preferences, PreferenceStore) else None
+        self.preferences = self.preference_store.values if self.preference_store else (preferences or DesktopPreferences())
+        self.setStyleSheet(subapp_stylesheet(self.preferences.theme))
+        self._answer_field: QLineEdit | None = None
+        self._start_action: QPushButton | None = None
+        self._submit_action: QPushButton | None = None
+        self._next_action: QPushButton | None = None
+
     def _make_header(self, title: str, subtitle: str) -> QVBoxLayout:
         layout = QVBoxLayout(self)
-        heading = QHBoxLayout()
+        layout.setContentsMargins(22, 18, 22, 20)
+        layout.setSpacing(12)
+        header = QFrame(objectName="subAppHeader")
+        heading = QHBoxLayout(header)
+        heading.setContentsMargins(16, 12, 14, 12)
         title_label = QLabel(title)
-        title_label.setStyleSheet("font-size: 22px; font-weight: 700;")
+        title_label.setObjectName("subAppTitle")
         heading.addWidget(title_label, 1)
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.clicked.connect(self.open_settings)
+        heading.addWidget(self.settings_button)
         self.back_button = QPushButton("Back to Hub Page")
+        self.back_button.setObjectName("backAction")
         self.back_button.clicked.connect(self.close)
         heading.addWidget(self.back_button)
-        layout.addLayout(heading)
+        layout.addWidget(header)
         description = QLabel(subtitle)
+        description.setObjectName("subAppDescription")
         description.setWordWrap(True)
         layout.addWidget(description)
         return layout
+
+    def open_settings(self) -> None:
+        if self.preference_store is None:
+            return
+        if PreferencesDialog(self.preference_store, self).exec() == QDialog.DialogCode.Accepted:
+            self.preferences = self.preference_store.values
+            self.setStyleSheet(subapp_stylesheet(self.preferences.theme))
 
     @staticmethod
     def _styled_feedback(label: QLabel) -> None:
@@ -103,10 +133,73 @@ class _GameDialog(QDialog):
         label.setMinimumHeight(42)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+    def _install_keyboard_navigation(
+        self,
+        answer: QLineEdit,
+        start: QPushButton,
+        submit: QPushButton,
+        next_action: QPushButton,
+    ) -> None:
+        """Keep Return inside the game and expose explicit W/S actions.
+
+        QDialog normally treats an unclaimed Return as acceptance.  A line edit
+        can emit ``returnPressed`` and still allow that key event to reach its
+        dialog, which made a completed answer appear to close the game.  The
+        event filter consumes Return at the field before that can happen.
+        """
+        self._answer_field = answer
+        self._start_action = start
+        self._submit_action = submit
+        self._next_action = next_action
+        answer.installEventFilter(self)
+        for button in (self.back_button, start, submit, next_action):
+            button.setAutoDefault(False)
+            button.setDefault(False)
+
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            watched is self._answer_field
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+        ):
+            self._answer_entered()
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        focus = QApplication.focusWidget()
+
+        # Never let Return implicitly accept and close a cognitive game.  When
+        # an action button has focus, activate that button explicitly instead.
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if focus is self._answer_field:
+                self._answer_entered()
+            elif isinstance(focus, QPushButton) and focus.isEnabled():
+                focus.click()
+            event.accept()
+            return
+
+        # W = start/submit and S = continue.  Preserve normal text entry when
+        # the answer field (or another line edit) has focus.
+        if not isinstance(focus, QLineEdit):
+            if key == Qt.Key.Key_W:
+                action = self._submit_action if self._submit_action and self._submit_action.isEnabled() else self._start_action
+                if action is not None and action.isEnabled():
+                    action.click()
+                    event.accept()
+                    return
+            if key == Qt.Key.Key_S and self._next_action is not None and self._next_action.isEnabled():
+                self._next_action.click()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
 
 class SpellingBeeDialog(_GameDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, parent=None, *, preferences: DesktopPreferences | PreferenceStore | None = None):
+        super().__init__(parent, preferences=preferences)
         self.setWindowTitle("AIHuMo Cognitive Game — Spelling Bee")
         self.resize(820, 620)
         self.entries = tuple(WordEntry(word, definition) for word, definition in FALLBACK_WORDS)
@@ -130,12 +223,13 @@ class SpellingBeeDialog(_GameDialog):
         source_row.addWidget(self.dictionary_button)
         layout.addWidget(source)
 
-        controls = QFormLayout()
+        round_setup = QGroupBox("Round setup")
+        controls = QFormLayout(round_setup)
         self.difficulty = QComboBox(); self.difficulty.addItems(("Easy", "Medium", "Hard"))
         self.rounds = QSpinBox(); self.rounds.setRange(1, 50); self.rounds.setValue(10)
         controls.addRow("Difficulty", self.difficulty)
         controls.addRow("Rounds", self.rounds)
-        layout.addLayout(controls)
+        layout.addWidget(round_setup)
 
         self.progress = QLabel("Press Start to begin.")
         self.progress.setStyleSheet("font-weight: 700;")
@@ -148,23 +242,25 @@ class SpellingBeeDialog(_GameDialog):
         layout.addWidget(self.definition)
         self.answer = QLineEdit()
         self.answer.setPlaceholderText("Type the spelling here…")
-        self.answer.returnPressed.connect(self._answer_entered)
         layout.addWidget(self.answer)
         actions = QHBoxLayout()
         self.start_button = QPushButton("Start")
         self.start_button.clicked.connect(self.start_game)
-        self.submit_button = QPushButton("Submit spelling")
+        self.submit_button = QPushButton("Submit spelling  [W]")
+        self.submit_button.setObjectName("primaryAction")
         self.submit_button.clicked.connect(self.submit_answer)
         self.submit_button.setEnabled(False)
-        self.next_button = QPushButton("Next word")
+        self.next_button = QPushButton("Next word  [S]")
         self.next_button.clicked.connect(self.next_word)
         self.next_button.setEnabled(False)
         for button in (self.start_button, self.submit_button, self.next_button):
             actions.addWidget(button)
         layout.addLayout(actions)
         self.feedback = QLabel()
+        self.feedback.setObjectName("statusPanel")
         self._styled_feedback(self.feedback)
         layout.addWidget(self.feedback)
+        self._install_keyboard_navigation(self.answer, self.start_button, self.submit_button, self.next_button)
 
     def choose_dictionary(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Choose dictionary CSV", "", "CSV files (*.csv)")
@@ -226,6 +322,7 @@ class SpellingBeeDialog(_GameDialog):
             self.feedback.setText(f"The answer was: {self.current.word}")
         self.submit_button.setEnabled(False)
         self.next_button.setEnabled(True)
+        self.next_button.setFocus()
 
     def _answer_entered(self) -> None:
         """Use Enter for the currently available spelling action.
@@ -240,8 +337,8 @@ class SpellingBeeDialog(_GameDialog):
 
 
 class MathGameDialog(_GameDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, parent=None, *, preferences: DesktopPreferences | PreferenceStore | None = None):
+        super().__init__(parent, preferences=preferences)
         self.setWindowTitle("AIHuMo Cognitive Game — Math Challenge")
         self.resize(820, 620)
         self.rng = random.Random()
@@ -254,31 +351,34 @@ class MathGameDialog(_GameDialog):
             "Math Challenge",
             "Solve generated addition, subtraction, multiplication, or division problems. Difficulty controls the number range and operation complexity.",
         )
-        controls = QFormLayout()
+        round_setup = QGroupBox("Round setup")
+        controls = QFormLayout(round_setup)
         self.operation = QComboBox(); self.operation.addItems(("Mixed", "Addition", "Subtraction", "Multiplication", "Division"))
         self.difficulty = QComboBox(); self.difficulty.addItems(("Easy", "Medium", "Hard"))
         self.rounds = QSpinBox(); self.rounds.setRange(1, 50); self.rounds.setValue(10)
         controls.addRow("Operation", self.operation)
         controls.addRow("Difficulty", self.difficulty)
         controls.addRow("Rounds", self.rounds)
-        layout.addLayout(controls)
+        layout.addWidget(round_setup)
         self.progress = QLabel("Press Start to begin."); self.progress.setStyleSheet("font-weight: 700;")
         layout.addWidget(self.progress)
         self.problem = QLabel("?")
+        self.problem.setObjectName("cognitivePrompt")
         self.problem.setStyleSheet("font-size: 42px; font-weight: 700;")
         self.problem.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.problem.setMinimumHeight(150)
         layout.addWidget(self.problem)
         self.answer = QLineEdit(); self.answer.setPlaceholderText("Enter your answer…")
-        self.answer.returnPressed.connect(self._answer_entered)
         layout.addWidget(self.answer)
         actions = QHBoxLayout()
         self.start_button = QPushButton("Start"); self.start_button.clicked.connect(self.start_game)
-        self.submit_button = QPushButton("Submit answer"); self.submit_button.clicked.connect(self.submit_answer); self.submit_button.setEnabled(False)
-        self.next_button = QPushButton("Next problem"); self.next_button.clicked.connect(self.next_problem); self.next_button.setEnabled(False)
+        self.submit_button = QPushButton("Submit answer  [W]"); self.submit_button.clicked.connect(self.submit_answer); self.submit_button.setEnabled(False)
+        self.submit_button.setObjectName("primaryAction")
+        self.next_button = QPushButton("Next problem  [S]"); self.next_button.clicked.connect(self.next_problem); self.next_button.setEnabled(False)
         for button in (self.start_button, self.submit_button, self.next_button): actions.addWidget(button)
         layout.addLayout(actions)
-        self.feedback = QLabel(); self._styled_feedback(self.feedback); layout.addWidget(self.feedback)
+        self.feedback = QLabel(objectName="statusPanel"); self._styled_feedback(self.feedback); layout.addWidget(self.feedback)
+        self._install_keyboard_navigation(self.answer, self.start_button, self.submit_button, self.next_button)
 
     def _new_problem(self) -> tuple[str, int | float]:
         level = self.difficulty.currentText()
@@ -333,6 +433,7 @@ class MathGameDialog(_GameDialog):
         else:
             self.feedback.setText(f"The answer was {self.answer_value}.")
         self.submit_button.setEnabled(False); self.next_button.setEnabled(True)
+        self.next_button.setFocus()
 
     def _answer_entered(self) -> None:
         """Use Enter for Submit or Next without scoring a problem twice."""
@@ -345,9 +446,9 @@ class MathGameDialog(_GameDialog):
 class CognitiveGameDialog(QDialog):
     """Small dispatcher so the Hub can launch standalone cognitive apps."""
 
-    def __new__(cls, game_id: str, parent=None):
+    def __new__(cls, game_id: str, parent=None, *, preferences: DesktopPreferences | PreferenceStore | None = None):
         if game_id == "spelling_bee":
-            return SpellingBeeDialog(parent)
+            return SpellingBeeDialog(parent, preferences=preferences)
         if game_id == "math_challenge":
-            return MathGameDialog(parent)
+            return MathGameDialog(parent, preferences=preferences)
         raise ValueError(f"Unknown cognitive game: {game_id}")

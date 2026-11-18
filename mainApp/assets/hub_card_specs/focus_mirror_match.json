@@ -1,0 +1,37 @@
+{
+  "lineColor": [246, 239, 218],
+  "nodeColor": [224, 174, 83],
+  "outlineColor": [117, 83, 42],
+  "lineWidth": 3,
+  "nodeRadius": 4,
+  "people": [
+    {
+      "left_shoulder": [130, 105],
+      "left_elbow": [94, 104],
+      "left_wrist": [87, 117],
+      "right_shoulder": [208, 111],
+      "right_elbow": [264, 113],
+      "right_wrist": [312, 105],
+      "left_hip": [150, 162],
+      "right_hip": [182, 168],
+      "left_knee": [103, 174],
+      "right_knee": [172, 222],
+      "left_ankle": [88, 120],
+      "right_ankle": [171, 295]
+    },
+    {
+      "left_shoulder": [432, 111],
+      "left_elbow": [376, 113],
+      "left_wrist": [328, 105],
+      "right_shoulder": [510, 105],
+      "right_elbow": [546, 104],
+      "right_wrist": [553, 117],
+      "left_hip": [458, 168],
+      "right_hip": [490, 162],
+      "left_knee": [468, 222],
+      "right_knee": [537, 174],
+      "left_ankle": [469, 295],
+      "right_ankle": [552, 120]
+    }
+  ]
+}

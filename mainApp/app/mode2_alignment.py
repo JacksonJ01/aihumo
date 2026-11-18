@@ -28,7 +28,8 @@ from .common import ReviewWindow, close_and_return
 from .graph_navigation import FrameZoomToolbar, centered_time_limits, wheel_zoom_factor, zoom_to_seek_button
 from .mode1_annotation import AnnotationStudio
 from .playback import FrameBuffer, PlaybackSpeed, review_window_is_covered
-from .preferences import DEFAULT_FRAME_JUMP
+from .preferences import DEFAULT_FRAME_JUMP, PreferencesDialog
+from .subapp_style import subapp_stylesheet
 from .trim_subvideos import TrimSubVideosDialog, trim_aligned_recordings
 
 
@@ -40,6 +41,9 @@ class SessionAlignmentWindow(ReviewWindow):
 
     def __init__(self, parent, processed_root: Path, *, frame_jump=DEFAULT_FRAME_JUMP):
         super().__init__(parent, Qt.WindowType.Window)
+        self.preferences = getattr(parent, "preferences", None)
+        if self.preferences is not None:
+            self.setStyleSheet(subapp_stylesheet(self.preferences.values.theme))
         self.setWindowTitle("AIHuMo · Mode 2 Session Alignment")
         self.setMinimumSize(850, 600)
         self.processed_root = processed_root
@@ -70,6 +74,8 @@ class SessionAlignmentWindow(ReviewWindow):
         self.setCentralWidget(central)
         toolbar = QHBoxLayout()
         self._button(toolbar, "Back to menu", lambda: close_and_return(self))
+        if self.preferences is not None:
+            self._button(toolbar, "Settings", self.open_settings)
         self.process_button = self._button(toolbar, "Process recordings…", self._choose_recordings)
         self.load_button = self._button(toolbar, "Load alignment…", self._load)
         self.save_button = self._button(toolbar, "Save alignment…", self._save)
@@ -144,6 +150,12 @@ class SessionAlignmentWindow(ReviewWindow):
         button.clicked.connect(callback)
         layout.addWidget(button)
         return button
+
+    def open_settings(self) -> None:
+        if self.preferences is None:
+            return
+        if PreferencesDialog(self.preferences, self).exec() == QDialog.DialogCode.Accepted:
+            self.setStyleSheet(subapp_stylesheet(self.preferences.values.theme))
 
     @staticmethod
     def _number(layout, label, minimum, maximum, decimals, step):

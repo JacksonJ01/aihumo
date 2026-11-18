@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import logging
+import queue
+import re
 import shutil
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -17,7 +21,11 @@ from .graphs import generate_angle_graphs
 from .metadata import build_metadata
 from .pose import extract_landmarks_dataframe, inspect_video, iter_landmark_rows
 from .processing_state import ProcessingState, fingerprint_file, stable_json_hash
+from .performance import ProcessingPerformanceTracker
 from .quality import build_quality_report
+from .tracking_quality import detect_tracking_anomalies
+from .annotation_suggestions import generate_annotation_suggestions
+from .resource_estimation import DiskSpaceGuard, apply_processing_profile, processing_profile
 from .storage import (
     assert_single_canonical_feature_parquet,
     load_json,
@@ -30,6 +38,7 @@ from .validation import validate_artifacts, validate_frame_dataframe
 
 LOGGER = logging.getLogger(__name__)
 ProgressCallback = Callable[[float, str], None]
+FramePacketCallback = Callable[[int, np.ndarray, dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -43,6 +52,42 @@ class ProcessingResult:
     quality_report_path: Path
     processing_state_path: Path
     graph_manifest_path: Path | None = None
+    processing_profile: str = "standard"
+    annotation_suggestions_path: Path | None = None
+    processing_performance_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class ProcessingProgress:
+    """Structured progress while retaining the legacy fraction/message callback."""
+
+    video_fraction: float
+    stage: str
+    stage_fraction: float
+    message: str
+    elapsed_s: float
+    estimated_remaining_s: float | None
+    throughput_fps: float | None
+    available_storage_bytes: int | None
+
+
+_PROGRESS_STAGES = (
+    ("inspection_and_decoding", 0.00, 0.05),
+    ("pose_estimation", 0.05, 0.42),
+    ("skeleton_rendering", 0.42, 0.62),
+    ("feature_extraction", 0.62, 0.88),
+    ("tracking_quality_and_suggestions", 0.88, 0.90),
+    ("parquet_and_metadata_export", 0.90, 0.96),
+    ("finalization_and_validation", 0.96, 1.00),
+)
+
+
+def classify_processing_progress(fraction: float) -> tuple[str, float]:
+    value = float(max(0.0, min(1.0, fraction)))
+    for stage, start, end in _PROGRESS_STAGES:
+        if value <= end or end == 1.0:
+            return stage, float(max(0.0, min(1.0, (value - start) / max(end - start, 1e-9))))
+    return _PROGRESS_STAGES[-1][0], 1.0
 
 
 def _emit(callback: ProgressCallback | None, fraction: float, message: str) -> None:
@@ -65,6 +110,8 @@ def _artifact_paths(output_root: Path, session_id: str, video_id: str) -> dict[s
         "metadata_path": output_dir / "metadata" / f"{video_id}_metadata.json",
         "manifest_path": output_dir / "metadata" / f"{video_id}_feature_manifest.json",
         "quality_path": output_dir / "metadata" / f"{video_id}_quality_report.json",
+        "performance_path": output_dir / "metadata" / f"{video_id}_processing_performance.json",
+        "suggestions_path": output_dir / "metadata" / f"{video_id}_annotation_suggestions.json",
     }
 
 
@@ -180,6 +227,233 @@ def _hex_to_bgr(color: str) -> tuple[int, int, int]:
     except ValueError as exc:
         raise ValueError(f"Invalid skeleton color {color!r}.") from exc
     return blue, green, red
+
+
+def _pixel_points_from_row(row: dict[str, Any] | pd.Series, width: int, height: int) -> list[tuple[int, int] | None]:
+    points: list[tuple[int, int] | None] = []
+    for index in range(33):
+        x = row.get(f"lm{index}_x", np.nan)
+        y = row.get(f"lm{index}_y", np.nan)
+        points.append(
+            (int(round(float(x) * width)), int(round(float(y) * height)))
+            if np.isfinite(x) and np.isfinite(y) else None
+        )
+    return points
+
+
+def _draw_skeleton_overlay(
+    frame: np.ndarray,
+    points: list[tuple[int, int] | None],
+    *,
+    line_color: tuple[int, int, int],
+    joint_color: tuple[int, int, int],
+    bbox: tuple[float, float, float, float] | None = None,
+    tracking_status: str = "tracked",
+) -> None:
+    """Draw the canonical skeleton overlay onto one decoded frame in place."""
+    height, width = frame.shape[:2]
+    for first, second in POSE_CONNECTIONS:
+        if points[first] is not None and points[second] is not None:
+            cv2.line(frame, points[first], points[second], line_color, 2, cv2.LINE_AA)
+    for point in points:
+        if point is not None:
+            cv2.circle(frame, point, 3, joint_color, -1, cv2.LINE_AA)
+
+    def midpoint(first: tuple[int, int] | None, second: tuple[int, int] | None) -> tuple[int, int] | None:
+        if first is None or second is None:
+            return None
+        return (
+            int(round((first[0] + second[0]) / 2.0)),
+            int(round((first[1] + second[1]) / 2.0)),
+        )
+
+    shoulder_midpoint = midpoint(points[11], points[12])
+    hip_midpoint = midpoint(points[23], points[24])
+    knee_midpoint = midpoint(points[25], points[26])
+    ankle_midpoint = midpoint(points[27], points[28])
+    for first, second in (
+        (points[0], shoulder_midpoint),
+        (shoulder_midpoint, hip_midpoint),
+        (hip_midpoint, knee_midpoint),
+        (knee_midpoint, ankle_midpoint),
+    ):
+        if first is not None and second is not None:
+            cv2.line(frame, first, second, (255, 180, 0), 2, cv2.LINE_AA)
+    for point, label in (
+        (shoulder_midpoint, "SM"),
+        (hip_midpoint, "HM"),
+        (knee_midpoint, "KM"),
+        (ankle_midpoint, "AM"),
+    ):
+        if point is not None:
+            cv2.circle(frame, point, 5, (255, 180, 0), -1, cv2.LINE_AA)
+            cv2.putText(
+                frame, label, (point[0] + 6, point[1] - 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 180, 0), 1, cv2.LINE_AA,
+            )
+
+    if bbox is not None and np.isfinite(bbox).all():
+        x1, y1, x2, y2 = bbox
+        left, top = int(round(x1 * width)), int(round(y1 * height))
+        right, bottom = int(round(x2 * width)), int(round(y2 * height))
+        cv2.rectangle(frame, (left, top), (right, bottom), (255, 200, 0), 2, cv2.LINE_AA)
+        cv2.putText(
+            frame, str(tracking_status), (left, max(20, top - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 2, cv2.LINE_AA,
+        )
+
+
+class SkeletonRenderQueue:
+    """Bounded, ordered skeleton renderer fed by the MediaPipe producer.
+
+    The queue owns one background thread and one temporary MP4.  It never
+    mutates landmark rows and applies backpressure instead of retaining an
+    unbounded number of decoded frames in memory.
+    """
+
+    _STOP = object()
+
+    def __init__(
+        self,
+        output_path: str | Path,
+        video_info: dict[str, Any],
+        *,
+        expected_frames: int,
+        max_queue_size: int = 24,
+        skeleton_line_color: str = "#00ff00",
+        skeleton_joint_color: str = "#ff0000",
+        cancel_check: Callable[[], bool] | None = None,
+    ):
+        self.output_path = Path(output_path)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.expected_frames = int(expected_frames)
+        self.cancel_check = cancel_check
+        self.line_color = _hex_to_bgr(skeleton_line_color)
+        self.joint_color = _hex_to_bgr(skeleton_joint_color)
+        self.queue: queue.Queue = queue.Queue(maxsize=max(1, int(max_queue_size)))
+        self.processed = 0
+        self.error: BaseException | None = None
+        self._aborted = threading.Event()
+        self._started = False
+        self._input_closed = False
+        self._thread = threading.Thread(target=self._run, name="AIHuMoSkeletonRenderer", daemon=True)
+
+        fps = float(video_info["source_fps"])
+        width, height = int(video_info["width"]), int(video_info["height"])
+        self.frame_size = (width, height)
+        self.writer = cv2.VideoWriter(
+            str(self.output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, self.frame_size
+        )
+        if not self.writer.isOpened():
+            raise RuntimeError(f"Could not create queued skeleton video: {self.output_path}")
+
+    def start(self) -> None:
+        self._started = True
+        self._thread.start()
+
+    def submit(self, frame_index: int, frame: np.ndarray, row: dict[str, Any]) -> None:
+        if not self._started:
+            raise RuntimeError("Skeleton render queue has not been started.")
+        packet = (int(frame_index), frame, row)
+        while True:
+            self._raise_worker_error()
+            if self.cancel_check and self.cancel_check():
+                raise InterruptedError("Skeleton video generation was cancelled.")
+            try:
+                self.queue.put(packet, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+    def close_input(self) -> None:
+        if not self._input_closed:
+            self._put_stop()
+            self._input_closed = True
+
+    def finish(self) -> int:
+        self.close_input()
+        self._thread.join()
+        self._raise_worker_error()
+        if self.processed != self.expected_frames:
+            raise RuntimeError(
+                f"Queued skeleton output frame count mismatch: {self.processed} "
+                f"vs expected {self.expected_frames}"
+            )
+        return self.processed
+
+    def abort(self) -> None:
+        self._aborted.set()
+        if self._started and self._thread.is_alive():
+            self._put_stop(discard_pending=True)
+            self._thread.join(timeout=10)
+        else:
+            self.writer.release()
+        self.output_path.unlink(missing_ok=True)
+
+    def _put_stop(self, *, discard_pending: bool = False) -> None:
+        if discard_pending:
+            while True:
+                try:
+                    self.queue.get_nowait()
+                    self.queue.task_done()
+                except queue.Empty:
+                    break
+        while self._thread.is_alive():
+            try:
+                self.queue.put(self._STOP, timeout=0.1)
+                return
+            except queue.Full:
+                if discard_pending:
+                    try:
+                        self.queue.get_nowait()
+                        self.queue.task_done()
+                    except queue.Empty:
+                        pass
+        self._raise_worker_error()
+
+    def _raise_worker_error(self) -> None:
+        if self.error is not None:
+            raise RuntimeError(f"Skeleton rendering worker failed: {self.error}") from self.error
+
+    def _run(self) -> None:
+        try:
+            while True:
+                packet = self.queue.get()
+                try:
+                    if packet is self._STOP:
+                        return
+                    if self._aborted.is_set() or self.error is not None:
+                        continue
+                    frame_index, frame, row = packet
+                    if frame_index != self.processed:
+                        raise RuntimeError(
+                            f"Skeleton queue received frame {frame_index} after {self.processed - 1}."
+                        )
+                    height, width = frame.shape[:2]
+                    if (width, height) != self.frame_size:
+                        raise ValueError(
+                            f"Skeleton queue frame size changed to {width}x{height}; expected "
+                            f"{self.frame_size[0]}x{self.frame_size[1]}."
+                        )
+                    points = _pixel_points_from_row(row, width, height)
+                    bbox_values = tuple(row.get(f"target_bbox_{axis}", np.nan) for axis in ("x1", "y1", "x2", "y2"))
+                    bbox = bbox_values if np.isfinite(bbox_values).all() else None
+                    _draw_skeleton_overlay(
+                        frame,
+                        points,
+                        line_color=self.line_color,
+                        joint_color=self.joint_color,
+                        bbox=bbox,
+                        tracking_status=str(row.get("target_status", "tracked")),
+                    )
+                    self.writer.write(frame)
+                    self.processed += 1
+                except BaseException as exc:  # communicate native OpenCV failures to the producer
+                    self.error = exc
+                finally:
+                    self.queue.task_done()
+        finally:
+            self.writer.release()
 
 
 def create_skeleton_video(
@@ -370,6 +644,7 @@ def _extract_with_checkpoints(
     cfg: dict[str, Any],
     progress_callback: ProgressCallback | None,
     cancel_check: Callable[[], bool] | None,
+    frame_callback: FramePacketCallback | None = None,
 ) -> pd.DataFrame:
     checkpoint_interval = max(1, int(cfg.get("processing", {}).get("checkpoint_interval_frames", 300)))
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -417,6 +692,7 @@ def _extract_with_checkpoints(
             ),
             progress_callback=lambda p, m: _emit(progress_callback, 0.05 + p * 0.35, m),
             cancel_check=cancel_check,
+            frame_callback=frame_callback,
         ):
             chunk_rows.append(row)
             if len(chunk_rows) >= checkpoint_interval:
@@ -505,9 +781,12 @@ def process_video(
     optional_metadata: dict,
     output_root: str | Path,
     progress_callback: ProgressCallback | None = None,
+    stage_progress_callback: Callable[[ProcessingProgress], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     skeleton_line_color: str = "#00ff00",
     skeleton_joint_color: str = "#ff0000",
+    processing_profile_name: str = "standard",
+    disk_safety_margin_bytes: int = 0,
 ) -> ProcessingResult:
     """Run the complete Mode 0 pipeline with crash-safe raw checkpoints.
 
@@ -518,6 +797,8 @@ def process_video(
     source_video = Path(source_video)
     model_path = Path(model_path)
     output_root = Path(output_root)
+    selected_profile = processing_profile(processing_profile_name)
+    cfg = apply_processing_profile(cfg, selected_profile)
     session_id = str(identifiers["session_id"])
     video_id = str(identifiers["video_id"])
     paths = _artifact_paths(output_root, session_id, video_id)
@@ -526,6 +807,53 @@ def process_video(
         raise FileNotFoundError(f"Source video does not exist: {source_video}")
     if not model_path.is_file():
         raise FileNotFoundError(f"MediaPipe model does not exist: {model_path}")
+
+    disk_guard = (
+        DiskSpaceGuard(output_root, minimum_free_bytes=disk_safety_margin_bytes)
+        if disk_safety_margin_bytes > 0 else None
+    )
+    last_available_storage = (
+        disk_guard.check("processing startup") if disk_guard is not None else None
+    )
+    started_at = time.monotonic()
+    last_fraction = 0.0
+    last_storage_check = 0.0
+    legacy_progress_callback = progress_callback
+    performance_tracker = ProcessingPerformanceTracker(
+        temp_path=paths["output_dir"] / ".processing"
+    )
+
+    def report_progress(fraction: float, message: str) -> None:
+        nonlocal last_fraction, last_storage_check, last_available_storage
+        now = time.monotonic()
+        value = max(last_fraction, float(max(0.0, min(1.0, fraction))))
+        last_fraction = value
+        available = last_available_storage
+        if disk_guard is not None and (now - last_storage_check >= 2.0 or value >= 1.0):
+            available = disk_guard.check(message)
+            last_available_storage = available
+            last_storage_check = now
+        if legacy_progress_callback is not None:
+            legacy_progress_callback(value, message)
+        stage, stage_fraction = classify_processing_progress(value)
+        match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s+processing FPS", message)
+        throughput_fps = float(match.group(1)) if match else None
+        performance_tracker.observe(stage, throughput_fps=throughput_fps)
+        if stage_progress_callback is not None:
+            elapsed = now - started_at
+            eta = elapsed * (1.0 - value) / value if elapsed >= 0.25 and value >= 0.01 else None
+            stage_progress_callback(ProcessingProgress(
+                video_fraction=value,
+                stage=stage,
+                stage_fraction=stage_fraction,
+                message=message,
+                elapsed_s=elapsed,
+                estimated_remaining_s=eta,
+                throughput_fps=throughput_fps,
+                available_storage_bytes=available,
+            ))
+
+    progress_callback = report_progress
 
     output_dir = paths["output_dir"]
     for key in ("video_dir", "parquet_dir", "metadata_dir", "checkpoint_dir"):
@@ -566,9 +894,10 @@ def process_video(
         state.save(paths["state_path"])
 
     if state.status == "completed":
+        review_video_path = paths["processed_video_path"] if selected_profile.skeleton_overlay else source_video
         validate_artifacts(
             source_video=source_video,
-            processed_video=paths["processed_video_path"],
+            processed_video=review_video_path,
             landmarks_path=paths["landmarks_path"],
             features_path=paths["features_path"],
             metadata_path=paths["metadata_path"],
@@ -578,11 +907,20 @@ def process_video(
         graph_path = output_dir / "Graphs" / "graph_manifest.json"
         return ProcessingResult(
             output_dir, paths["landmarks_path"], paths["features_path"],
-            paths["processed_video_path"], paths["metadata_path"],
+            review_video_path, paths["metadata_path"],
             paths["manifest_path"], paths["quality_path"], paths["state_path"],
             graph_manifest_path=graph_path if graph_path.is_file() else None,
+            processing_profile=selected_profile.id,
+            annotation_suggestions_path=(
+                paths["suggestions_path"] if paths["suggestions_path"].is_file() else None
+            ),
+            processing_performance_path=(
+                paths["performance_path"] if paths["performance_path"].is_file() else None
+            ),
         )
 
+    stream_renderer: SkeletonRenderQueue | None = None
+    partial_video = paths["processed_video_path"].with_suffix(".partial.mp4")
     try:
         _emit(progress_callback, 0.02, "Inspecting source video")
         video_info = inspect_video(source_video)
@@ -598,23 +936,57 @@ def process_video(
         state.recording_identity = _recording_identity(identifiers)
         state.save(paths["state_path"])
 
+        streamed_skeleton = False
         if paths["landmarks_path"].exists() and state.next_frame >= video_info["frame_count"]:
             landmark_df = load_parquet(paths["landmarks_path"])
             validate_frame_dataframe(landmark_df)
         else:
-            landmark_df = _extract_with_checkpoints(
-                source_video=source_video,
-                model_path=model_path,
-                pose_cfg=cfg.get("pose", {}),
-                identifiers=identifiers,
-                video_info=video_info,
-                state=state,
-                state_path=paths["state_path"],
-                checkpoint_dir=paths["checkpoint_dir"],
-                cfg=cfg,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
+            # A fresh job can render each decoded frame in parallel with the
+            # next MediaPipe inference. Resumed jobs intentionally use the
+            # established second pass because MP4 cannot be appended safely at
+            # an arbitrary checkpoint frame.
+            can_stream_skeleton = (
+                selected_profile.skeleton_overlay
+                and not paths["processed_video_path"].exists()
+                and state.next_frame == 0
+                and not paths["landmarks_path"].exists()
             )
+            if can_stream_skeleton:
+                partial_video.unlink(missing_ok=True)
+                stream_renderer = SkeletonRenderQueue(
+                    partial_video,
+                    video_info,
+                    expected_frames=video_info["frame_count"],
+                    max_queue_size=int(cfg.get("processing", {}).get("skeleton_queue_size", 24)),
+                    skeleton_line_color=skeleton_line_color,
+                    skeleton_joint_color=skeleton_joint_color,
+                    cancel_check=cancel_check,
+                )
+                stream_renderer.start()
+            try:
+                landmark_df = _extract_with_checkpoints(
+                    source_video=source_video,
+                    model_path=model_path,
+                    pose_cfg=cfg.get("pose", {}),
+                    identifiers=identifiers,
+                    video_info=video_info,
+                    state=state,
+                    state_path=paths["state_path"],
+                    checkpoint_dir=paths["checkpoint_dir"],
+                    cfg=cfg,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    frame_callback=stream_renderer.submit if stream_renderer is not None else None,
+                )
+                if stream_renderer is not None:
+                    # Stop accepting packets, but let the bounded renderer
+                    # drain concurrently with feature generation below.
+                    stream_renderer.close_input()
+                    streamed_skeleton = True
+            except BaseException:
+                if stream_renderer is not None:
+                    stream_renderer.abort()
+                raise
 
         # Recording metadata lives on every frame. Labels do not.
         for key, value in optional_metadata.items():
@@ -629,23 +1001,25 @@ def process_video(
         state.stage = "landmarks_saved"
         state.save(paths["state_path"])
 
-        rendered_skeleton = not paths["processed_video_path"].exists()
+        rendered_skeleton = selected_profile.skeleton_overlay and not paths["processed_video_path"].exists()
         if rendered_skeleton:
-            _emit(progress_callback, 0.42, "Creating skeleton-overlay video")
-            partial_video = paths["processed_video_path"].with_suffix(".partial.mp4")
-            partial_video.unlink(missing_ok=True)
-            create_skeleton_video(
-                source_video,
-                landmark_df,
-                partial_video,
-                lambda p, m: _emit(progress_callback, 0.42 + p * 0.18, m),
-                cancel_check,
-                skeleton_line_color=skeleton_line_color,
-                skeleton_joint_color=skeleton_joint_color,
-            )
-            partial_video.replace(paths["processed_video_path"])
-        state.stage = "skeleton_saved"
-        state.save(paths["state_path"])
+            if streamed_skeleton:
+                _emit(progress_callback, 0.42, "Skeleton queue draining while features are generated")
+            else:
+                _emit(progress_callback, 0.42, "Creating skeleton-overlay video (resume-safe pass)")
+                partial_video.unlink(missing_ok=True)
+                create_skeleton_video(
+                    source_video,
+                    landmark_df,
+                    partial_video,
+                    lambda p, m: _emit(progress_callback, 0.42 + p * 0.18, m),
+                    cancel_check,
+                    skeleton_line_color=skeleton_line_color,
+                    skeleton_joint_color=skeleton_joint_color,
+                )
+                partial_video.replace(paths["processed_video_path"])
+                state.stage = "skeleton_saved"
+                state.save(paths["state_path"])
 
         if paths["features_path"].exists():
             final_df = load_parquet(paths["features_path"])
@@ -675,23 +1049,53 @@ def process_video(
             LOGGER.info("Final feature count: %d", len(feature_columns))
         state.stage = "features_saved"
         state.save(paths["state_path"])
+        if streamed_skeleton and stream_renderer is not None:
+            _emit(progress_callback, 0.88, "Finalizing queued skeleton video")
+            stream_renderer.finish()
+            partial_video.replace(paths["processed_video_path"])
+            state.stage = "features_and_skeleton_saved"
+            state.save(paths["state_path"])
+            _emit(progress_callback, 0.89, "Queued skeleton video complete")
         # FeatureEngine owns a separate frame table. The raw landmark table is
         # no longer needed after this point and can be released before reports,
         # optional graph export, and final artifact validation.
         del landmark_df
 
+        _emit(progress_callback, 0.88, "Analyzing tracking quality")
+        tracking_quality = detect_tracking_anomalies(
+            final_df,
+            visibility_threshold=float(cfg.get("quality", {}).get("landmark_visibility_threshold", 0.35)),
+            window_seconds=float(cfg.get("quality", {}).get("anomaly_window_seconds", 0.75)),
+            hampel_sigma=float(cfg.get("quality", {}).get("hampel_sigma", 6.0)),
+        )
         quality_report = build_quality_report(final_df, feature_columns)
+        quality_report["tracking_anomalies"] = tracking_quality
         quality_report["ready_for_annotation"] = (
             quality_report["pose_present_fraction"]
             >= float(cfg.get("quality", {}).get("min_pose_present_fraction", 0.80))
         )
         quality_report["thresholds"] = cfg.get("quality", {})
 
+        _emit(progress_callback, 0.895, "Generating review-only annotation suggestions")
+        annotation_suggestions = generate_annotation_suggestions(
+            final_df,
+            config=cfg,
+            tracking_quality=tracking_quality,
+            exercise_hint=optional_metadata.get("exercise_hint"),
+            processing_version=cfg.get("project", {}).get("processing_version"),
+        ) if selected_profile.annotation_suggestions else {
+            "schema_version": "1.0",
+            "authoritative_source": "annotations.json",
+            "suggestions": [],
+            "diagnostics": {"abstentions": ["Annotation suggestions disabled by processing profile."]},
+        }
+
+        review_video_path = paths["processed_video_path"] if selected_profile.skeleton_overlay else source_video
         metadata = build_metadata(
             cfg=cfg,
             identifiers=identifiers,
             source_video=source_video,
-            processed_video=paths["processed_video_path"],
+            processed_video=review_video_path,
             landmarks_parquet=paths["landmarks_path"],
             features_parquet=paths["features_path"],
             video_info={**video_info, "frame_count": len(final_df)},
@@ -701,8 +1105,12 @@ def process_video(
         metadata["model_fingerprint"] = model_fingerprint
         metadata["config_fingerprint"] = config_fingerprint
         metadata["quality_report"] = str(paths["quality_path"])
+        metadata["processing_performance"] = str(paths["performance_path"])
+        metadata["annotation_suggestions"] = str(paths["suggestions_path"])
         metadata["annotation_ground_truth"] = "separate annotations.json; never stored in feature Parquet"
         metadata["target_tracking"] = cfg.get("tracking", {})
+        metadata["processing_profile"] = selected_profile.id
+        metadata["skeleton_overlay_generated"] = bool(selected_profile.skeleton_overlay)
         if rendered_skeleton:
             metadata["skeleton_midpoints_baked"] = True
 
@@ -730,15 +1138,23 @@ def process_video(
             "project": cfg.get("project", {}),
             **identifiers,
             "source_video": str(source_video),
-            "processed_video": str(paths["processed_video_path"]),
+            "processed_video": str(review_video_path),
+            "generated_skeleton_overlay": (
+                str(paths["processed_video_path"]) if selected_profile.skeleton_overlay else None
+            ),
             "landmarks_parquet": str(paths["landmarks_path"]),
             "features_parquet": str(paths["features_path"]),
             "metadata_json": str(paths["metadata_path"]),
             "quality_report_json": str(paths["quality_path"]),
+            "processing_performance_json": str(paths["performance_path"]),
+            "annotation_suggestions_json": str(paths["suggestions_path"]),
             "video": {**video_info, "frame_count": len(final_df)},
             "processing": {
                 "checkpoint_interval_frames": int(cfg.get("processing", {}).get("checkpoint_interval_frames", 300)),
                 "resume_supported": True,
+                "resume_scope": "landmark extraction resumes from persisted frame chunks; interrupted MP4 encoding restarts only the atomic encoding pass",
+                "mp4_mid_file_append_supported": False,
+                "profile": selected_profile.id,
                 "single_in_memory_feature_dataframe": True,
                 "target_tracking": cfg.get("tracking", {}),
             },
@@ -753,17 +1169,36 @@ def process_video(
         save_json_atomic(metadata, paths["metadata_path"])
         save_json_atomic(manifest, paths["manifest_path"])
         save_json_atomic(quality_report, paths["quality_path"])
+        save_json_atomic(annotation_suggestions, paths["suggestions_path"])
 
         _emit(progress_callback, 0.96, "Validating saved artifacts")
         validate_artifacts(
             source_video=source_video,
-            processed_video=paths["processed_video_path"],
+            processed_video=review_video_path,
             landmarks_path=paths["landmarks_path"],
             features_path=paths["features_path"],
             metadata_path=paths["metadata_path"],
             manifest_path=paths["manifest_path"],
             quality_path=paths["quality_path"],
         )
+
+        try:
+            performance_tracker.finish(
+                performance_path=paths["performance_path"],
+                history_path=output_root / ".aihumo" / "performance_history.json",
+                video_info={**video_info, "frame_count": len(final_df)},
+                source_video=source_video,
+                model_path=model_path,
+                profile=selected_profile.id,
+                output_paths=(
+                    paths["processed_video_path"] if selected_profile.skeleton_overlay else None,
+                    paths["landmarks_path"], paths["features_path"], paths["metadata_path"],
+                    paths["manifest_path"], paths["quality_path"],
+                    Path(graph_manifest["manifestPath"]) if graph_manifest is not None else None,
+                ),
+            )
+        except (OSError, TypeError, ValueError):
+            LOGGER.exception("Could not save optional local processing performance analytics")
 
         state.status = "completed"
         state.stage = "completed"
@@ -779,19 +1214,31 @@ def process_video(
             output_dir=output_dir,
             landmarks_path=paths["landmarks_path"],
             features_path=paths["features_path"],
-            processed_video_path=paths["processed_video_path"],
+            processed_video_path=review_video_path,
             metadata_path=paths["metadata_path"],
             feature_manifest_path=paths["manifest_path"],
             quality_report_path=paths["quality_path"],
             processing_state_path=paths["state_path"],
             graph_manifest_path=Path(graph_manifest["manifestPath"]) if graph_manifest is not None else None,
+            processing_profile=selected_profile.id,
+            annotation_suggestions_path=paths["suggestions_path"],
+            processing_performance_path=(
+                paths["performance_path"] if paths["performance_path"].is_file() else None
+            ),
         )
 
     except InterruptedError:
+        if stream_renderer is not None:
+            stream_renderer.abort()
         raise
     except Exception as exc:
+        if stream_renderer is not None:
+            stream_renderer.abort()
         state.status = "failed"
         state.error = f"{type(exc).__name__}: {exc}"
-        state.save(paths["state_path"])
+        try:
+            state.save(paths["state_path"])
+        except OSError:
+            LOGGER.exception("Could not persist failure state; original processing error follows")
         LOGGER.exception("Video processing failed")
         raise

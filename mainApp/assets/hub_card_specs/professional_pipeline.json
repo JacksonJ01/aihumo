@@ -1,0 +1,23 @@
+{
+  "lineColor": [91, 211, 198],
+  "nodeColor": [241, 174, 63],
+  "outlineColor": [255, 219, 147],
+  "lineWidth": 3,
+  "nodeRadius": 4,
+  "people": [
+    {
+      "left_shoulder": [171, 143],
+      "left_elbow": [188, 165],
+      "left_wrist": [224, 173],
+      "right_shoulder": [199, 140],
+      "right_elbow": [225, 144],
+      "right_wrist": [268, 146],
+      "left_hip": [163, 194],
+      "right_hip": [191, 195],
+      "left_knee": [162, 219],
+      "right_knee": [221, 209],
+      "left_ankle": [156, 249],
+      "right_ankle": [220, 248]
+    }
+  ]
+}

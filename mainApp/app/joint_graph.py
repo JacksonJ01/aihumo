@@ -52,7 +52,7 @@ from aihumo.features import (
 
 from .angle_overlay import OverlayTrace, angle_name
 from .graph_navigation import FrameZoomToolbar, centered_time_limits, wheel_zoom_factor, zoom_to_seek_button
-from .timeline_layers import LAYERS, interval_color, project_intervals, timeline_preferences, tracking_intervals, visible_layers
+from .timeline_layers import LAYERS, interval_color, project_intervals, suggestion_intervals, timeline_preferences, tracking_intervals, visible_layers
 
 TORSO_SOURCE = "Torso-normalized 2D"
 WORLD_SOURCE = "Estimated world (3D)"
@@ -322,6 +322,7 @@ class JointGraphWidget(QWidget):
         self._frame_ids = self._numeric_column(self.frame_column) if self.frame_column else np.arange(len(dataframe))
         self._annotation_settings = timeline_preferences(annotation_settings)
         self._annotation_intervals = ()
+        self._suggestion_intervals = ()
         self._quality_intervals = tracking_intervals(dataframe, self._times)
         self._annotation_artists = []
         self._annotation_key = None
@@ -942,6 +943,10 @@ class JointGraphWidget(QWidget):
         self._annotation_intervals = project_intervals(rows, self._times, self._frame_ids)
         self._refresh_annotations()
 
+    def set_suggestions(self, rows) -> None:
+        self._suggestion_intervals = suggestion_intervals(rows, self._times, self._frame_ids)
+        self._refresh_annotations()
+
     def select_annotation(self, annotation_id) -> None:
         annotation_id = annotation_id or ""
         if annotation_id != self._selected_annotation:
@@ -989,7 +994,7 @@ class JointGraphWidget(QWidget):
         for artist in self._annotation_artists:
             artist.remove()
         self._annotation_artists.clear()
-        intervals = (*self._annotation_intervals, *self._quality_intervals)
+        intervals = (*self._annotation_intervals, *self._suggestion_intervals, *self._quality_intervals)
         if style == "Off":
             self.annotation_hint.setText("")
             return

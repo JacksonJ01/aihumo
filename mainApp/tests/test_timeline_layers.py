@@ -7,7 +7,24 @@ import pytest
 from app.joint_graph import ALL_GRAPHS_MODE, JointGraphWidget, extrema_samples
 from app.playback import FrameBuffer, FramePlayback
 from app.preferences import DesktopPreferences, PreferenceStore, TimelineSettingsPanel
-from app.timeline_layers import interval_color, project_intervals, timeline_preferences, visible_layers
+from app.timeline_layers import (
+    interval_color, project_intervals, suggestion_intervals, timeline_preferences, visible_layers,
+)
+
+
+def test_pending_suggestions_project_separately_from_saved_annotations():
+    times = np.array([0.0, 0.1, 0.2, 0.3])
+    rows = [
+        {"suggestion_id": "S1", "annotation_layer": "rep", "suggested_label": "rep_1",
+         "start_frame": 1, "end_frame": 2, "review_status": "pending"},
+        {"suggestion_id": "S2", "annotation_layer": "set", "suggested_label": "set_1",
+         "start_frame": 0, "end_frame": 3, "review_status": "accepted"},
+    ]
+    intervals = suggestion_intervals(rows, times, np.arange(4))
+    assert len(intervals) == 1
+    assert intervals[0].layer == "suggestion"
+    assert intervals[0].annotation_id == "S1"
+    assert intervals[0].label == "Rep: rep_1"
 
 
 def test_native_annotation_ranges_and_zoom():

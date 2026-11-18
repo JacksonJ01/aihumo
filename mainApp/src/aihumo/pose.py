@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import numbers
+import time
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -194,6 +195,7 @@ def iter_landmark_rows(
     previous_timestamp_s: float | None = None,
     progress_callback: ProgressCallback | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    frame_callback: Callable[[int, np.ndarray, dict], None] | None = None,
 ) -> Iterator[dict]:
     """Yield regular MediaPipe pose rows without performing final Parquet I/O.
 
@@ -234,6 +236,7 @@ def iter_landmark_rows(
         mp = _mediapipe()
         with _make_landmarker(model_path, pose_cfg) as landmarker:
             frame_idx = start_frame
+            processing_started = time.perf_counter()
             last_timestamp_s = previous_timestamp_s
             last_inference_ms = -1
             while frame_idx < stop_frame:
@@ -369,13 +372,19 @@ def iter_landmark_rows(
                 else:
                     _write_pose_row(row, None, None)
 
+                if frame_callback is not None:
+                    frame_callback(frame_idx, frame_bgr, row)
                 yield row
                 frame_idx += 1
                 if frame_idx == start_frame + 1 or frame_idx % 30 == 0 or frame_idx == stop_frame:
+                    elapsed = max(time.perf_counter() - processing_started, 1e-9)
+                    processing_fps = (frame_idx - start_frame) / elapsed
+                    remaining_s = max(0.0, stop_frame - frame_idx) / max(processing_fps, 1e-9)
                     _emit(
                         progress_callback,
                         frame_idx / max(1, declared_frame_count),
-                        f"Pose/tracking: frame {frame_idx}/{declared_frame_count}",
+                        f"Pose/tracking: frame {frame_idx}/{declared_frame_count} | "
+                        f"{processing_fps:.1f} processing FPS | ETA {remaining_s / 60.0:.1f} min",
                     )
     finally:
         cap.release()

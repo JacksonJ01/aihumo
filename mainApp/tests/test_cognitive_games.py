@@ -1,5 +1,9 @@
 from app.cognitive_games import MathGameDialog, SpellingBeeDialog, WordEntry, load_dictionary
 from app.main_hub import MainHubDialog
+from app.preferences import DesktopPreferences, PreferenceStore
+from PyQt6.QtCore import Qt
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QDialog
 
 
 def test_dictionary_loader_filters_duplicates_and_unusable_words(tmp_path):
@@ -18,6 +22,23 @@ def test_dictionary_loader_filters_duplicates_and_unusable_words(tmp_path):
         WordEntry("Balance", "A steady condition.", "noun"),
         WordEntry("motion", "The act of moving.", "noun"),
     )
+
+
+def test_cognitive_games_share_settings_and_refresh_theme(qt_app, tmp_path, monkeypatch):
+    store = PreferenceStore(tmp_path / "settings.json")
+    store.save(DesktopPreferences(theme="Light", setup_completed=True))
+    dialog = MathGameDialog(preferences=store)
+    try:
+        assert dialog.preference_store is store
+        assert dialog.settings_button.isEnabled()
+        assert "#f5f7fb" in dialog.styleSheet()
+        store.save(DesktopPreferences(theme="Dark", setup_completed=True))
+        monkeypatch.setattr("app.cognitive_games.PreferencesDialog.exec", lambda _self: QDialog.DialogCode.Accepted)
+        dialog.open_settings()
+        assert dialog.preferences.theme == "Dark"
+        assert "#091426" in dialog.styleSheet()
+    finally:
+        dialog.close()
 
 
 def test_spelling_bee_uses_loaded_words_and_scores_answer(qt_app, tmp_path):
@@ -59,6 +80,61 @@ def test_spelling_bee_enter_submits_then_advances(qt_app):
         assert dialog.current is not first
         assert dialog.round_number == 2
         assert dialog.submit_button.isEnabled()
+    finally:
+        dialog.close()
+
+
+def test_spelling_bee_real_enter_never_closes_dialog(qt_app):
+    dialog = SpellingBeeDialog()
+    try:
+        dialog.entries = (WordEntry("motion", "The act of moving."),)
+        dialog.difficulty.setCurrentText("Medium")
+        dialog.rounds.setValue(1)
+        dialog.show()
+        dialog.start_game()
+        dialog.answer.setText("motion")
+        dialog.answer.setFocus()
+        QTest.keyClick(dialog.answer, Qt.Key.Key_Return)
+        qt_app.processEvents()
+        assert dialog.isVisible()
+        assert dialog.correct == 1
+        assert dialog.next_button.isEnabled()
+
+        # Return on the explicit Continue action completes the round but does
+        # not accept/close the dialog itself.
+        dialog.next_button.setFocus()
+        QTest.keyClick(dialog.next_button, Qt.Key.Key_Return)
+        qt_app.processEvents()
+        assert dialog.isVisible()
+        assert dialog.current is None
+    finally:
+        dialog.close()
+
+
+def test_math_enter_and_ws_navigation_do_not_accept_dialog(qt_app):
+    dialog = MathGameDialog()
+    try:
+        dialog.rounds.setValue(2)
+        dialog.show()
+        dialog.start_game()
+        dialog.answer.setText(str(dialog.answer_value))
+        dialog.answer.setFocus()
+        QTest.keyClick(dialog.answer, Qt.Key.Key_Return)
+        qt_app.processEvents()
+        assert dialog.isVisible()
+        assert dialog.correct == 1
+
+        dialog.next_button.setFocus()
+        QTest.keyClick(dialog, Qt.Key.Key_S)
+        qt_app.processEvents()
+        assert dialog.isVisible()
+        assert dialog.round_number == 2
+
+        # W and S remain ordinary characters while typing in a text field.
+        dialog.answer.setText("")
+        dialog.answer.setFocus()
+        QTest.keyClicks(dialog.answer, "ws")
+        assert dialog.answer.text() == "ws"
     finally:
         dialog.close()
 

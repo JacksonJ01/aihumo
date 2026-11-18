@@ -8,7 +8,7 @@ from typing import Any
 from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget,
+    QLineEdit, QMessageBox, QProgressBar, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,8 +18,13 @@ if str(SRC_DIR) not in sys.path:
 
 from aihumo.config import load_config
 from aihumo.processing import process_video, processing_job_status
-from .preferences import ParticipantPicker, PreferenceStore
+from aihumo.performance import observed_processing_fps
+from aihumo.resource_estimation import PROFILES, apply_processing_profile, estimate_processing_resources
+from .preflight import PreflightDialog, format_bytes, format_duration
+from .preferences import ParticipantPicker, PreferenceStore, PreferencesDialog
+from .app_paths import default_processed_root, user_data_dir
 from .processing_resume import restore_processing_fields
+from .subapp_style import subapp_stylesheet
 from .trim_subvideos import processed_inventory
 
 LOGGER = logging.getLogger("AIHuMoDataStudio.Mode0")
@@ -39,6 +44,7 @@ CAMERA_ANGLE_OPTIONS = [
 
 class ProcessingWorker(QObject):
     progress = pyqtSignal(float, str)
+    stage_progress = pyqtSignal(object)
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
     cancelled = pyqtSignal(str)
@@ -56,6 +62,7 @@ class ProcessingWorker(QObject):
             result = process_video(
                 **self.kwargs,
                 progress_callback=self.progress.emit,
+                stage_progress_callback=self.stage_progress.emit,
                 cancel_check=lambda: self.cancel_requested,
             )
             self.finished.emit(result)
@@ -80,6 +87,8 @@ class ProcessVideoDialog(QDialog):
         self.worker: ProcessingWorker | None = None
         self._finish_after_thread_stops = False
         self.config_path = PROJECT_ROOT / "configs" / "config.json"
+        self.preferences = preferences or PreferenceStore(user_data_dir() / "settings.json")
+        self.setStyleSheet(subapp_stylesheet(self.preferences.values.theme))
 
         layout = QVBoxLayout(self)
         scroll = QScrollArea()
@@ -94,7 +103,6 @@ class ProcessVideoDialog(QDialog):
         self.model_edit = QLineEdit()
         self.session_edit = QLineEdit("S001")
         self.video_id_edit = QLineEdit("V001")
-        self.preferences = preferences or PreferenceStore(PROJECT_ROOT / ".aihumo" / "settings.json")
         self.participant_picker = ParticipantPicker(self.preferences)
         self.participant_edit = self.participant_picker.edit
         self.camera_id_edit = QLineEdit(self.preferences.values.default_camera_name or "camera_01")
@@ -111,8 +119,12 @@ class ProcessVideoDialog(QDialog):
         self.notes_edit = QTextEdit(); self.notes_edit.setMaximumHeight(80)
         self.output_edit = QLineEdit(
             self.preferences.values.default_output_directory
-            or str(PROJECT_ROOT / "data" / "processed")
+            or str(default_processed_root())
         )
+        self.profile_combo = QComboBox()
+        for profile in PROFILES.values():
+            self.profile_combo.addItem(profile.title, profile.id)
+        self.profile_combo.setCurrentIndex(self.profile_combo.findData("standard"))
         self.open_mode1_check = QCheckBox("Open Mode 1 automatically after successful processing")
         self.open_mode1_check.setChecked(True)
 
@@ -131,6 +143,7 @@ class ProcessVideoDialog(QDialog):
         form.addRow("Notes", self.notes_edit)
         form.addRow("MediaPipe model", self._browse_row(self.model_edit, self.browse_model, "MediaPipe Task (*.task);;All Files (*)"))
         form.addRow("Output root", self._browse_row(self.output_edit, self.browse_output, ""))
+        form.addRow("Output profile", self.profile_combo)
         self.processed_inventory_label = QLabel()
         self.processed_inventory_label.setWordWrap(True)
         form.addRow("Processed inventory", self.processed_inventory_label)
@@ -143,9 +156,22 @@ class ProcessVideoDialog(QDialog):
         layout.addWidget(self.job_status)
         self.progress_label = QLabel("")
         layout.addWidget(self.progress_label)
+        self.video_progress_bar = QProgressBar()
+        self.video_progress_bar.setRange(0, 1000)
+        self.video_progress_bar.setFormat("Current video: %p%")
+        layout.addWidget(self.video_progress_bar)
+        self.stage_progress_bar = QProgressBar()
+        self.stage_progress_bar.setRange(0, 1000)
+        self.stage_progress_bar.setFormat("Current stage: %p%")
+        layout.addWidget(self.stage_progress_bar)
+        self.progress_metrics = QLabel("")
+        self.progress_metrics.setWordWrap(True)
+        layout.addWidget(self.progress_metrics)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Process Video")
+        self.settings_button = self.buttons.addButton("Settings", QDialogButtonBox.ButtonRole.ActionRole)
+        self.settings_button.clicked.connect(self.open_settings)
         self.buttons.accepted.connect(self.start_processing)
         self.buttons.rejected.connect(self.cancel_or_close)
         layout.addWidget(self.buttons)
@@ -158,8 +184,13 @@ class ProcessVideoDialog(QDialog):
         self.video_id_edit.textChanged.connect(self.refresh_job_status)
         self.model_edit.textChanged.connect(self.refresh_job_status)
         self.output_edit.textChanged.connect(self.refresh_job_status)
+        self.profile_combo.currentIndexChanged.connect(self.refresh_job_status)
         self.output_edit.textChanged.connect(self.refresh_processed_inventory)
         self.refresh_processed_inventory()
+
+    def open_settings(self) -> None:
+        if PreferencesDialog(self.preferences, self).exec() == QDialog.DialogCode.Accepted:
+            self.setStyleSheet(subapp_stylesheet(self.preferences.values.theme))
 
     @staticmethod
     def _browse_row(edit: QLineEdit, callback, file_filter: str):
@@ -208,7 +239,7 @@ class ProcessVideoDialog(QDialog):
             self.job_status.clear()
             return
         try:
-            cfg = load_config(self.config_path)
+            cfg = apply_processing_profile(load_config(self.config_path), self.profile_combo.currentData())
             status = processing_job_status(
                 source_video=source,
                 model_path=model,
@@ -254,6 +285,9 @@ class ProcessVideoDialog(QDialog):
             return
 
         cfg = load_config(self.config_path)
+        profile_id = self.profile_combo.currentData()
+        effective_cfg = apply_processing_profile(cfg, profile_id)
+        output_root = Path(self.output_edit.text().strip())
         optional = {
             "camera_name": self.camera_name_edit.text().strip() or None,
             "recording_date": self.recording_date_edit.text().strip() or None,
@@ -271,8 +305,8 @@ class ProcessVideoDialog(QDialog):
             status = processing_job_status(
                 source_video=source_video,
                 model_path=model_path,
-                cfg=cfg,
-                output_root=Path(self.output_edit.text().strip()),
+                cfg=effective_cfg,
+                output_root=output_root,
                 session_id=required["session_id"],
                 video_id=required["video_id"],
                 identifiers=identifiers,
@@ -287,8 +321,30 @@ class ProcessVideoDialog(QDialog):
             QMessageBox.critical(self, "Job check failed", f"{type(exc).__name__}: {exc}")
             return
 
+        try:
+            estimate = estimate_processing_resources(
+                [source_video], output_root, profile=profile_id,
+                feature_count=int(cfg.get("features", {}).get("estimated_feature_count", 450)),
+                safety_margin_bytes=(
+                    int(self.preferences.values.minimum_free_storage_gib * 1024 ** 3)
+                    if self.preferences.values.minimum_free_storage_gib > 0 else None
+                ),
+                observed_processing_fps=observed_processing_fps(
+                    output_root / ".aihumo" / "performance_history.json",
+                    profile=str(profile_id),
+                ),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Preflight failed", f"{type(exc).__name__}: {exc}")
+            return
+        if PreflightDialog(estimate, self).exec() != QDialog.DialogCode.Accepted:
+            return
+
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
-        self.status.setText("Processing in worker thread. Recovery checkpoints are written during landmark extraction.")
+        self.status.setText(
+            "Processing in worker thread. Landmark extraction resumes from saved chunks; "
+            "an interrupted MP4 restarts only its atomic encoding pass."
+        )
         self.thread = QThread(self)
         self.worker = ProcessingWorker({
             "source_video": source_video,
@@ -296,13 +352,16 @@ class ProcessVideoDialog(QDialog):
             "cfg": cfg,
             "identifiers": identifiers,
             "optional_metadata": optional,
-            "output_root": Path(self.output_edit.text().strip()),
+            "output_root": output_root,
             "skeleton_line_color": self.preferences.values.skeleton_line,
             "skeleton_joint_color": self.preferences.values.skeleton_joint,
+            "processing_profile_name": profile_id,
+            "disk_safety_margin_bytes": estimate.safety_margin_bytes,
         })
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.on_progress)
+        self.worker.stage_progress.connect(self.on_stage_progress)
         self.worker.finished.connect(self.on_finished)
         self.worker.failed.connect(self.on_failed)
         self.worker.cancelled.connect(self.on_cancelled)
@@ -317,6 +376,21 @@ class ProcessVideoDialog(QDialog):
     def on_progress(self, fraction: float, message: str):
         self.status.setText(message)
         self.progress_label.setText(f"Progress: {fraction * 100:.1f}%")
+        self.video_progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
+
+    def on_stage_progress(self, progress) -> None:
+        self.stage_progress_bar.setValue(int(progress.stage_fraction * 1000))
+        self.stage_progress_bar.setFormat(
+            f"{progress.stage.replace('_', ' ').title()}: %p%"
+        )
+        details = [f"Elapsed {format_duration(progress.elapsed_s)}"]
+        if progress.estimated_remaining_s is not None:
+            details.append(f"Estimated remaining {format_duration(progress.estimated_remaining_s)}")
+        if progress.throughput_fps is not None:
+            details.append(f"Throughput {progress.throughput_fps:.1f} FPS")
+        if progress.available_storage_bytes is not None:
+            details.append(f"Available storage {format_bytes(progress.available_storage_bytes)}")
+        self.progress_metrics.setText("  ·  ".join(details))
 
     def on_finished(self, result):
         self.result = result

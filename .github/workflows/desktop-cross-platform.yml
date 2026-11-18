@@ -6,11 +6,11 @@ on:
       version:
         description: Package version without the leading v
         required: true
-        default: 0.1.6
+        default: 0.5.0
       release_tag:
         description: GitHub release tag to create or update
         required: true
-        default: desktop-v0.1.6
+        default: desktop-v0.5.0
   push:
     tags:
       - desktop-v*
@@ -217,7 +217,9 @@ jobs:
 
       - name: Build native package
         shell: pwsh
-        run: '& "mainApp/AI Humo EXE pipeline/Windows/build_portable.ps1" -Version $env:PACKAGE_VERSION'
+        run: |
+          choco install innosetup --no-progress -y
+          & "mainApp/AI Humo EXE pipeline/Windows/build_installer.ps1" -Version $env:PACKAGE_VERSION
 
       - name: Smoke-test frozen launcher
         shell: pwsh
@@ -227,13 +229,18 @@ jobs:
           $exe = "mainApp/AI Humo EXE pipeline/dist/v$env:PACKAGE_VERSION/AIHuMo Data Studio/AIHuMo Data Studio.exe"
           & mainApp/.venv/Scripts/python.exe -c "import subprocess; subprocess.run([r'$exe', '--smoke-test'], check=True, timeout=60)"
 
-      - name: Verify package checksum
+      - name: Verify package checksums
         shell: pwsh
         run: |
-          $zip = "mainApp/AI Humo EXE pipeline/release/AIHuMo-Data-Studio-Windows-v$env:PACKAGE_VERSION.zip"
-          $expected = (Get-Content "$zip.sha256").Split()[0]
-          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "Package checksum mismatch" }
+          $files = @(
+            "mainApp/AI Humo EXE pipeline/release/AIHuMo-Data-Studio-Windows-v$env:PACKAGE_VERSION.zip",
+            "mainApp/AI Humo EXE pipeline/release/AIHuMo-Data-Studio-Windows-x64-Setup-v$env:PACKAGE_VERSION.exe"
+          )
+          foreach ($file in $files) {
+            $expected = (Get-Content "$file.sha256").Split()[0]
+            $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) { throw "Package checksum mismatch: $file" }
+          }
 
       - name: Upload workflow package
         uses: actions/upload-artifact@v4

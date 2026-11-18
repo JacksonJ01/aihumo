@@ -6,14 +6,17 @@ import logging
 from pathlib import Path
 import re
 
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QDoubleSpinBox, QHBoxLayout, QInputDialog, QLabel, QListWidget, QLineEdit, QMessageBox, QPushButton, QSpinBox,
-    QTabWidget, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSlider, QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from aihumo.storage import load_json, save_json_atomic
+from .app_paths import installer_bootstrap_path
+from .subapp_style import fit_window_to_available_screen
 from .timeline_layers import LAYERS, SEMANTIC_COLORS, timeline_preferences, valid_thresholds
 
 LOGGER = logging.getLogger(__name__)
@@ -24,6 +27,7 @@ COLOR_FIELDS = {
     "skeleton_line": "Skeleton lines",
     "skeleton_joint": "Skeleton joints",
 }
+HUB_BACKGROUND_DIR = Path(__file__).resolve().parents[1] / "assets" / "hub_backgrounds"
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,10 @@ class DesktopPreferences:
     participants: tuple[str, ...] = ()
     default_participant: str = ""
     starter_video: str = ""
+    starter_videos: tuple[str, ...] = ()
+    starter_skeleton: str = ""
+    starter_features: str = ""
+    starter_annotations: str = ""
     setup_completed: bool = False
     default_frame_jump: int = DEFAULT_FRAME_JUMP
     default_camera_name: str = "camera_01"
@@ -50,6 +58,25 @@ class DesktopPreferences:
     interface_scale: float = 1.0
     theme: str = "System"
     hub_galaxy_mode: bool = False
+    hub_background_mode: str = "Default"
+    hub_custom_background: str = ""
+    hub_background_blur: bool = True
+    hub_background_blur_strength: int = 5
+    hub_background_opacity: float = 0.48
+    hub_parallax_strength: float = 0.65
+    hub_background_style_version: int = 2
+    hub_background_crop_x: float = 0.5
+    hub_background_crop_y: float = 0.5
+    hub_artwork_style: str = "Focus Mode"
+    game_default_difficulty: str = "adaptive"
+    game_countdown_s: int = 0
+    game_audio_cues: bool = True
+    game_show_instructions: bool = True
+    game_high_contrast_targets: bool = False
+    game_auto_save_results: bool = False
+    game_results_directory: str = ""
+    game_target_period_scale: float = 1.0
+    game_calibration_s: float = 1.0
     arrow_keys_navigate: bool = True
     loop_selected_interval: bool = False
     pause_at_annotation_boundary: bool = False
@@ -68,6 +95,7 @@ class DesktopPreferences:
     generate_graph_previews: bool = True
     export_graph_images: bool = False
     output_versioning: str = "Create new version"
+    minimum_free_storage_gib: float = 0.0
     default_annotation_layer: str = "activity_state"
     default_activity_state: str = "active"
     default_phase_schema: str = "eccentric, concentric, hold"
@@ -96,6 +124,11 @@ class PreferenceStore:
             )) if isinstance(raw, list) else ()
             default = data.get("default_participant")
             starter_video = data.get("starter_video")
+            raw_starter_videos = data.get("starter_videos")
+            starter_videos = tuple(dict.fromkeys(
+                value.strip() for value in raw_starter_videos
+                if isinstance(value, str) and value.strip()
+            )) if isinstance(raw_starter_videos, list) else ()
             jump = data.get("default_frame_jump")
             def text(name, fallback=""):
                 value = data.get(name, fallback)
@@ -112,10 +145,29 @@ class PreferenceStore:
             def flag(name, fallback):
                 return data.get(name, fallback) if type(data.get(name, fallback)) is bool else fallback
 
+            background_version = bounded_number("hub_background_style_version", 1, 1, 2, integer=True)
+            background_blur_strength = bounded_number("hub_background_blur_strength", 5, 0, 30, integer=True)
+            background_opacity = bounded_number("hub_background_opacity", 0.48, 0.0, 1.0)
+            background_parallax = bounded_number("hub_parallax_strength", 0.65, 0.0, 1.0)
+            # Version 1 shipped with values that made the light artwork nearly
+            # invisible and the motion difficult to notice. Migrate only the
+            # exact old defaults so deliberate user choices remain untouched.
+            if background_version < 2:
+                if background_blur_strength == 8:
+                    background_blur_strength = 5
+                if abs(background_opacity - 0.22) < 1e-9:
+                    background_opacity = 0.48
+                if abs(background_parallax - 0.35) < 1e-9:
+                    background_parallax = 0.65
+
             self.values = DesktopPreferences(
                 **colors, participants=participants,
                 default_participant=default if default in participants else "",
                 starter_video=starter_video.strip() if isinstance(starter_video, str) else "",
+                starter_videos=starter_videos,
+                starter_skeleton=text("starter_skeleton"),
+                starter_features=text("starter_features"),
+                starter_annotations=text("starter_annotations"),
                 # Existing settings files are already configured users. Only a
                 # brand-new settings file should show the optional first-run flow.
                 setup_completed=bool(data.get("setup_completed", True)),
@@ -134,6 +186,30 @@ class PreferenceStore:
                 interface_scale=bounded_number("interface_scale", 1.0, 0.75, 2.0),
                 theme=text("theme", "System") if text("theme", "System") in {"System", "Light", "Dark", "High contrast"} else "System",
                 hub_galaxy_mode=flag("hub_galaxy_mode", False),
+                hub_background_mode=text("hub_background_mode", "Default") if text("hub_background_mode", "Default") in {"Default", "Custom"} else "Default",
+                hub_custom_background=text("hub_custom_background"),
+                hub_background_blur=flag("hub_background_blur", True),
+                hub_background_blur_strength=background_blur_strength,
+                hub_background_opacity=background_opacity,
+                hub_parallax_strength=background_parallax,
+                hub_background_style_version=2,
+                hub_background_crop_x=bounded_number("hub_background_crop_x", 0.5, 0.0, 1.0),
+                hub_background_crop_y=bounded_number("hub_background_crop_y", 0.5, 0.0, 1.0),
+                hub_artwork_style=(
+                    "Focus Mode" if text("hub_artwork_style", "Focus Mode") == "Vibrant"
+                    else text("hub_artwork_style", "Focus Mode")
+                    if text("hub_artwork_style", "Focus Mode") in {"Focus Mode", "Professional"}
+                    else "Focus Mode"
+                ),
+                game_default_difficulty=text("game_default_difficulty", "adaptive") if text("game_default_difficulty", "adaptive") in {"adaptive", "easy", "medium", "hard"} else "adaptive",
+                game_countdown_s=bounded_number("game_countdown_s", 0, 0, 10, integer=True),
+                game_audio_cues=flag("game_audio_cues", True),
+                game_show_instructions=flag("game_show_instructions", True),
+                game_high_contrast_targets=flag("game_high_contrast_targets", False),
+                game_auto_save_results=flag("game_auto_save_results", False),
+                game_results_directory=text("game_results_directory"),
+                game_target_period_scale=bounded_number("game_target_period_scale", 1.0, 0.5, 2.0),
+                game_calibration_s=bounded_number("game_calibration_s", 1.0, 0.0, 10.0),
                 arrow_keys_navigate=flag("arrow_keys_navigate", True),
                 loop_selected_interval=flag("loop_selected_interval", False),
                 pause_at_annotation_boundary=flag("pause_at_annotation_boundary", False),
@@ -152,6 +228,7 @@ class PreferenceStore:
                 generate_graph_previews=flag("generate_graph_previews", True),
                 export_graph_images=flag("export_graph_images", False),
                 output_versioning=text("output_versioning", "Create new version"),
+                minimum_free_storage_gib=bounded_number("minimum_free_storage_gib", 0.0, 0.0, 100000.0),
                 default_annotation_layer=text("default_annotation_layer", "activity_state"),
                 default_activity_state=text("default_activity_state", "active"),
                 default_phase_schema=text("default_phase_schema", "eccentric, concentric, hold"),
@@ -166,10 +243,74 @@ class PreferenceStore:
         save_json_atomic(asdict(values), self.path)
         self.values = values
 
+    def reload(self) -> DesktopPreferences:
+        """Refresh values written by another open AIHuMo window."""
+        self.values = type(self)(self.path).values
+        return self.values
+
     def add_participant(self, participant: str) -> None:
         participant = participant.strip()
         if participant and participant not in self.values.participants:
             self.save(replace(self.values, participants=(*self.values.participants, participant)))
+
+
+def apply_installer_bootstrap(store: PreferenceStore, path: Path | None = None) -> bool:
+    """Merge a native installer's one-time setup plan into desktop settings.
+
+    Existing non-empty preferences win, so reinstalling or upgrading cannot
+    silently replace a user's established folders or participant identity.
+    Invalid paths remain visible in setup but are never copied or opened until
+    the user confirms the first-run screen.
+    """
+    path = path or installer_bootstrap_path(store.path.parent)
+    if not path.is_file():
+        return False
+    data = load_json(path)
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise ValueError("The installer setup plan has an unsupported format.")
+
+    def clean(name: str) -> str:
+        value = data.get(name, "")
+        return value.strip() if isinstance(value, str) else ""
+
+    raw_videos = data.get("starter_videos", [])
+    videos = tuple(dict.fromkeys(
+        value.strip() for value in raw_videos if isinstance(value, str) and value.strip()
+    )) if isinstance(raw_videos, list) else ()
+    primary = clean("starter_video") or (videos[0] if videos else "")
+    current = store.values
+    participant = clean("participant")
+    participants = current.participants
+    if participant and participant not in participants:
+        participants = (*participants, participant)
+
+    def keep(current_value: str, incoming: str) -> str:
+        return current_value or incoming
+
+    angle = clean("camera_angle")
+    if angle not in {"N/A", "Front", "Side", "Rear", "Three-quarter", "Low angle", "High angle", "Camera adjustment", "Unknown"}:
+        angle = ""
+    store.save(replace(
+        current,
+        participants=participants,
+        default_participant=keep(current.default_participant, participant),
+        default_camera_name=keep(current.default_camera_name if current.default_camera_name != "camera_01" else "", clean("camera_name")) or "camera_01",
+        default_camera_angle=angle or current.default_camera_angle,
+        starter_video=keep(current.starter_video, primary),
+        starter_videos=current.starter_videos or videos,
+        starter_skeleton=keep(current.starter_skeleton, clean("starter_skeleton")),
+        starter_features=keep(current.starter_features, clean("starter_features")),
+        starter_annotations=keep(current.starter_annotations, clean("starter_annotations")),
+        default_source_directory=keep(current.default_source_directory, clean("source_directory")),
+        default_skeleton_directory=keep(current.default_skeleton_directory, clean("skeleton_directory")),
+        default_features_directory=keep(current.default_features_directory, clean("features_directory")),
+        default_annotations_directory=keep(current.default_annotations_directory, clean("annotations_directory")),
+        default_output_directory=keep(current.default_output_directory, clean("output_directory")),
+        setup_completed=False,
+    ))
+    consumed = path.with_name("installer-bootstrap.consumed.json")
+    path.replace(consumed)
+    return True
 
 
 class StartupSetupDialog(QDialog):
@@ -184,12 +325,13 @@ class StartupSetupDialog(QDialog):
         super().__init__(parent)
         self.store = store
         self.setWindowTitle("AIHuMo first-run setup")
-        self.resize(760, 540)
+        self.resize(820, 720)
         outer = QVBoxLayout(self)
         intro = QLabel(
             "Set up the first-run workspace for this computer. AIHuMo remembers the "
-            "participant, preferred camera angle, starter video, and default folders "
-            "used by later file pickers. Nothing is copied or uploaded."
+            "participant, preferred camera angle, starter recordings, and default folders "
+            "used by later file pickers. Nothing is copied or uploaded. Add several raw "
+            "videos, or pair the primary video with existing processed files to open Mode 1 directly."
         )
         intro.setWordWrap(True)
         outer.addWidget(intro)
@@ -210,11 +352,38 @@ class StartupSetupDialog(QDialog):
         video_layout.setContentsMargins(0, 0, 0, 0)
         self.video_edit = QLineEdit(store.values.starter_video)
         self.video_edit.setPlaceholderText("Choose a source or processed skeleton video")
-        browse = QPushButton("Browse…")
-        browse.clicked.connect(self._browse_video)
+        browse = QPushButton("Add videos…")
+        browse.clicked.connect(self._browse_videos)
         video_layout.addWidget(self.video_edit, 1)
         video_layout.addWidget(browse)
-        form.addRow("Starter video (optional)", video_row)
+        form.addRow("Primary starter video (optional)", video_row)
+
+        self.additional_videos = QListWidget()
+        self.additional_videos.setMaximumHeight(88)
+        for path in store.values.starter_videos:
+            if path and path != store.values.starter_video:
+                self.additional_videos.addItem(path)
+        remove_video = QPushButton("Remove selected additional video")
+        remove_video.clicked.connect(lambda: self.additional_videos.takeItem(self.additional_videos.currentRow()))
+        starter_group = QWidget()
+        starter_layout = QVBoxLayout(starter_group)
+        starter_layout.setContentsMargins(0, 0, 0, 0)
+        starter_layout.addWidget(self.additional_videos)
+        starter_layout.addWidget(remove_video)
+        form.addRow("Additional source videos", starter_group)
+
+        self.starter_skeleton = QLineEdit(store.values.starter_skeleton)
+        self.starter_features = QLineEdit(store.values.starter_features)
+        self.starter_annotations = QLineEdit(store.values.starter_annotations)
+        form.addRow("Matching skeleton video", self._file_row(
+            self.starter_skeleton, "Choose matching skeleton video", "Video Files (*.mp4 *.mov *.avi *.mkv *.webm)"
+        ))
+        form.addRow("Matching feature Parquet", self._file_row(
+            self.starter_features, "Choose matching feature Parquet", "Parquet Files (*.parquet)"
+        ))
+        form.addRow("Matching annotations", self._file_row(
+            self.starter_annotations, "Choose matching annotations", "Annotation JSON (*.json)"
+        ))
 
         self.source_directory = QLineEdit(store.values.default_source_directory)
         self.skeleton_directory = QLineEdit(store.values.default_skeleton_directory)
@@ -256,6 +425,21 @@ class StartupSetupDialog(QDialog):
         layout.addWidget(button)
         return row
 
+    def _file_row(self, edit: QLineEdit, title: str, file_filter: str) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("Browse…")
+        button.clicked.connect(lambda: self._browse_file(edit, title, file_filter))
+        layout.addWidget(edit, 1)
+        layout.addWidget(button)
+        return row
+
+    def _browse_file(self, edit: QLineEdit, title: str, file_filter: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, title, edit.text().strip() or "", file_filter)
+        if path:
+            edit.setText(path)
+
     def _browse_directory(self, edit: QLineEdit, title: str) -> None:
         path = QFileDialog.getExistingDirectory(self, title, edit.text().strip() or "")
         if path:
@@ -268,22 +452,47 @@ class StartupSetupDialog(QDialog):
         self.open_video.setEnabled(has_video)
 
     def _browse_video(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
+        """Backward-compatible single-file entry point used by older tests."""
+        paths, _ = QFileDialog.getOpenFileNames(
             self, "Choose starter video", self.source_directory.text().strip() or "",
             "Video Files (*.mp4 *.mov *.avi *.mkv *.webm);;All Files (*)",
         )
-        if path:
-            self.video_edit.setText(path)
+        if paths:
+            self._set_starter_videos(paths)
+
+    def _browse_videos(self) -> None:
+        self._browse_video()
+
+    def _set_starter_videos(self, paths: list[str]) -> None:
+        paths = list(dict.fromkeys(path.strip() for path in paths if path.strip()))
+        if not paths:
+            return
+        if not self.video_edit.text().strip():
+            self.video_edit.setText(paths.pop(0))
+        existing = {self.additional_videos.item(index).text() for index in range(self.additional_videos.count())}
+        existing.add(self.video_edit.text().strip())
+        for path in paths:
+            if path not in existing:
+                self.additional_videos.addItem(path)
+                existing.add(path)
 
     def _persist(self) -> None:
         participant = self.participant_edit.text().strip()
         participants = tuple(dict.fromkeys((*self.store.values.participants, participant))) if participant else self.store.values.participants
         video = self.video_edit.text().strip()
+        videos = tuple(dict.fromkeys(filter(None, (
+            video,
+            *(self.additional_videos.item(index).text().strip() for index in range(self.additional_videos.count())),
+        ))))
         self.store.save(replace(
             self.store.values,
             participants=participants,
             default_participant=participant if participant else self.store.values.default_participant,
             starter_video=video,
+            starter_videos=videos,
+            starter_skeleton=self.starter_skeleton.text().strip(),
+            starter_features=self.starter_features.text().strip(),
+            starter_annotations=self.starter_annotations.text().strip(),
             setup_completed=True,
             default_camera_angle=self.camera_angle_combo.currentData() or "Front",
             default_source_directory=self.source_directory.text().strip(),
@@ -295,6 +504,10 @@ class StartupSetupDialog(QDialog):
         self.setup = {
             "participant": participant,
             "video": video,
+            "videos": list(videos),
+            "skeleton": self.starter_skeleton.text().strip(),
+            "features": self.starter_features.text().strip(),
+            "annotations": self.starter_annotations.text().strip(),
             "open_video": bool(video and self.open_video.isChecked()),
             "camera_angle": self.camera_angle_combo.currentData() or "Front",
             "directories": {
@@ -360,19 +573,219 @@ class ParticipantPicker(QWidget):
         self.combo.setCurrentIndex(index)
 
 
+class BackgroundCropPreview(QWidget):
+    """Draggable, normalized 16:9 crop selector for custom Hub backgrounds."""
+
+    cropChanged = pyqtSignal(float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.source = QPixmap()
+        self.crop_x = 0.5
+        self.crop_y = 0.5
+        self._dragging = False
+        self.setMinimumHeight(250)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setToolTip("Drag the cyan display window to choose the saved Hub framing.")
+
+    def set_image(self, path: str) -> None:
+        self.source = QPixmap(path) if path and Path(path).is_file() else QPixmap()
+        self.update()
+
+    def set_crop(self, x: float, y: float) -> None:
+        self.crop_x = max(0.0, min(1.0, float(x)))
+        self.crop_y = max(0.0, min(1.0, float(y)))
+        self.update()
+
+    def _image_rect(self) -> QRectF:
+        area = QRectF(self.rect()).adjusted(12, 12, -12, -12)
+        if self.source.isNull():
+            return area
+        scale = min(area.width() / self.source.width(), area.height() / self.source.height())
+        width, height = self.source.width() * scale, self.source.height() * scale
+        return QRectF(area.center().x() - width / 2, area.center().y() - height / 2, width, height)
+
+    def _crop_rect(self) -> QRectF:
+        image = self._image_rect()
+        aspect = 16 / 9
+        if image.width() / max(1.0, image.height()) >= aspect:
+            height = image.height()
+            width = height * aspect
+        else:
+            width = image.width()
+            height = width / aspect
+        travel_x = max(0.0, image.width() - width)
+        travel_y = max(0.0, image.height() - height)
+        return QRectF(
+            image.left() + travel_x * self.crop_x,
+            image.top() + travel_y * self.crop_y,
+            width,
+            height,
+        )
+
+    def _move_crop(self, point: QPointF) -> None:
+        image = self._image_rect()
+        crop = self._crop_rect()
+        travel_x = max(0.0, image.width() - crop.width())
+        travel_y = max(0.0, image.height() - crop.height())
+        if travel_x:
+            self.crop_x = max(0.0, min(1.0, (point.x() - image.left() - crop.width() / 2) / travel_x))
+        if travel_y:
+            self.crop_y = max(0.0, min(1.0, (point.y() - image.top() - crop.height() / 2) / travel_y))
+        self.cropChanged.emit(self.crop_x, self.crop_y)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        image = self._image_rect()
+        painter.fillRect(self.rect(), QColor("#0c192c"))
+        if self.source.isNull():
+            painter.setPen(QColor("#b7c2d8"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Choose a custom image to adjust its framing")
+            painter.end()
+            return
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawPixmap(image, self.source, QRectF(self.source.rect()))
+        crop = self._crop_rect()
+        mask = QPainterPath()
+        mask.setFillRule(Qt.FillRule.OddEvenFill)
+        mask.addRect(image)
+        mask.addRoundedRect(crop, 9, 9)
+        painter.fillPath(mask, QColor(3, 9, 22, 155))
+        painter.setPen(QPen(QColor("#36c9d8"), 3))
+        painter.drawRoundedRect(crop, 9, 9)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(crop.adjusted(10, 8, -10, -8), Qt.AlignmentFlag.AlignTop, "Hub display window")
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._crop_rect().contains(event.position()):
+            self._dragging = True
+            self._move_crop(event.position())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
+            self._move_crop(event.position())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._dragging = False
+            self._move_crop(event.position())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class SettingsTabBar(QTabBar):
+    """West-side tab menu with upright, horizontally readable labels."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.window_color = QColor("#eef3f9")
+        self.panel_color = QColor("#ffffff")
+        self.text_color = QColor("#15213d")
+        self.muted_color = QColor("#63708a")
+        self.border_color = QColor("#cbd5e3")
+        self.accent_color = QColor("#22bdd1")
+        self._hover_index = -1
+        self.setMouseTracking(True)
+        self.setExpanding(False)
+
+    def set_colors(self, *, window: str, panel: str, text: str, muted: str,
+                   border: str, accent: str) -> None:
+        self.window_color = QColor(window)
+        self.panel_color = QColor(panel)
+        self.text_color = QColor(text)
+        self.muted_color = QColor(muted)
+        self.border_color = QColor(border)
+        self.accent_color = QColor(accent)
+        self.update()
+
+    def tabSizeHint(self, index: int) -> QSize:
+        return QSize(198, 58)
+
+    def mouseMoveEvent(self, event) -> None:
+        hover = self.tabAt(event.position().toPoint())
+        if hover != self._hover_index:
+            self._hover_index = hover
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover_index = -1
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), self.window_color)
+        for index in range(self.count()):
+            rect = self.tabRect(index).adjusted(5, 4, -5, -4)
+            selected = index == self.currentIndex()
+            hovered = index == self._hover_index
+            fill = self.panel_color if selected else self.window_color
+            if hovered and not selected:
+                fill = QColor(self.panel_color)
+                fill.setAlpha(150)
+            painter.setPen(QPen(self.accent_color if hovered else self.border_color, 1))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect, 10, 10)
+            if selected:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(self.accent_color)
+                painter.drawRoundedRect(QRectF(rect.left(), rect.top() + 7, 4, rect.height() - 14), 2, 2)
+            font = painter.font()
+            font.setBold(selected)
+            painter.setFont(font)
+            painter.setPen(self.text_color if selected or hovered else self.muted_color)
+            painter.drawText(rect.adjusted(18, 0, -10, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             self.tabText(index))
+        painter.end()
+
+
 class PreferencesDialog(QDialog):
     def __init__(self, store: PreferenceStore, parent=None):
         super().__init__(parent)
         self.store = store
         self.setWindowTitle("AIHuMo Settings")
-        self.resize(490, 470)
+        fit_window_to_available_screen(
+            self, preferred=(980, 700), minimum=(760, 520), coverage=(0.82, 0.82)
+        )
         outer = QVBoxLayout(self)
-        tabs = QTabWidget()
+        outer.setContentsMargins(18, 16, 18, 16)
+        outer.setSpacing(10)
+        title = QLabel("Personalize AIHuMo", objectName="settingsTitle")
+        subtitle = QLabel(
+            "Choose defaults for processing, annotation, visualization, games, and the Hub background.",
+            objectName="settingsSubtitle",
+        )
+        subtitle.setWordWrap(True)
+        outer.addWidget(title)
+        outer.addWidget(subtitle)
+        tabs = QTabWidget(objectName="settingsTabs")
+        self.settings_tab_bar = SettingsTabBar()
+        tabs.setTabBar(self.settings_tab_bar)
+        tabs.setTabPosition(QTabWidget.TabPosition.West)
+        tabs.setDocumentMode(True)
+        self.tabs = tabs
         outer.addWidget(tabs)
-        general = QWidget()
-        tabs.addTab(general, "General")
+        general_scroll = QScrollArea()
+        general_scroll.setWidgetResizable(True)
+        general_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        general = QWidget(objectName="settingsPage")
+        general_scroll.setWidget(general)
+        tabs.addTab(general_scroll, "General")
         layout = QVBoxLayout(general)
         self.timeline = TimelineSettingsPanel(store.values.timeline)
+        self.timeline.setObjectName("settingsPage")
         tabs.addTab(self.timeline, "Timeline & graphs")
         colors = QFormLayout()
         self.color_buttons = {}
@@ -426,6 +839,7 @@ class PreferencesDialog(QDialog):
         # the broader desktop controls as additive preference pages.  Every
         # control has a safe default so older settings files remain valid.
         playback = QWidget(); tabs.addTab(playback, "Playback")
+        playback.setObjectName("settingsPage")
         playback_form = QFormLayout(playback)
         self.default_camera_name = QLineEdit(store.values.default_camera_name)
         self.default_viewpoint = QLineEdit(store.values.default_viewpoint)
@@ -443,6 +857,7 @@ class PreferencesDialog(QDialog):
         playback_form.addRow("Theme", self.theme)
 
         visualization = QWidget(); tabs.addTab(visualization, "Visualization")
+        visualization.setObjectName("settingsPage")
         visualization_form = QFormLayout(visualization)
         self.default_visualization_mode = QComboBox(); self.default_visualization_mode.addItems(("2D", "3D")); self.default_visualization_mode.setCurrentText(store.values.default_visualization_mode)
         self.show_skeleton_by_default = QCheckBox("Show skeleton by default"); self.show_skeleton_by_default.setChecked(store.values.show_skeleton_by_default)
@@ -462,6 +877,7 @@ class PreferencesDialog(QDialog):
         visualization_form.addRow("Default graph window", self.graph_time_window_s)
 
         data_page = QWidget(); tabs.addTab(data_page, "Data & processing")
+        data_page.setObjectName("settingsPage")
         data_form = QFormLayout(data_page)
         self.smoothing_method = QComboBox(); self.smoothing_method.addItems(("None", "Moving average", "Exponential moving average", "Savitzky-Golay")); self.smoothing_method.setCurrentText(store.values.smoothing_method)
         self.smoothing_window = QSpinBox(); self.smoothing_window.setRange(3, 101); self.smoothing_window.setSingleStep(2); self.smoothing_window.setValue(store.values.smoothing_window)
@@ -471,6 +887,7 @@ class PreferencesDialog(QDialog):
         self.generate_graph_previews = QCheckBox("Generate graph previews after Mode 0"); self.generate_graph_previews.setChecked(store.values.generate_graph_previews)
         self.export_graph_images = QCheckBox("Export PNG/SVG graph images"); self.export_graph_images.setChecked(store.values.export_graph_images)
         self.output_versioning = QComboBox(); self.output_versioning.addItems(("Create new version", "Require confirmation", "Reuse only explicitly selected version")); self.output_versioning.setCurrentText(store.values.output_versioning)
+        self.minimum_free_storage_gib = QDoubleSpinBox(); self.minimum_free_storage_gib.setRange(0.0, 100000.0); self.minimum_free_storage_gib.setDecimals(1); self.minimum_free_storage_gib.setSingleStep(1.0); self.minimum_free_storage_gib.setValue(store.values.minimum_free_storage_gib); self.minimum_free_storage_gib.setSuffix(" GiB"); self.minimum_free_storage_gib.setSpecialValueText("Automatic (5% or 2 GiB)")
         data_form.addRow("Smoothing", self.smoothing_method)
         data_form.addRow("Smoothing window", self.smoothing_window)
         data_form.addRow("Confidence threshold", self.confidence_threshold)
@@ -479,8 +896,10 @@ class PreferencesDialog(QDialog):
         data_form.addRow(self.generate_graph_previews)
         data_form.addRow(self.export_graph_images)
         data_form.addRow("Output versioning", self.output_versioning)
+        data_form.addRow("Keep this much storage free", self.minimum_free_storage_gib)
 
         annotation_page = QWidget(); tabs.addTab(annotation_page, "Annotation")
+        annotation_page.setObjectName("settingsPage")
         annotation_form = QFormLayout(annotation_page)
         self.default_annotation_layer = QComboBox(); self.default_annotation_layer.addItems(("activity_state", "set", "rep", "phase", "form_interval", "other")); self.default_annotation_layer.setCurrentText(store.values.default_annotation_layer)
         self.default_activity_state = QComboBox(); self.default_activity_state.addItems(("active", "idle", "transition")); self.default_activity_state.setCurrentText(store.values.default_activity_state)
@@ -493,10 +912,176 @@ class PreferencesDialog(QDialog):
         annotation_form.addRow(self.inherit_annotation_context)
         annotation_form.addRow("Default form label", self.default_form_label)
 
+        games_page = QWidget(objectName="settingsPage"); tabs.addTab(games_page, "Games")
+        games_form = QFormLayout(games_page)
+        self.game_default_difficulty = QComboBox()
+        for label, value in (("Adaptive", "adaptive"), ("Easy", "easy"), ("Medium", "medium"), ("Hard", "hard")):
+            self.game_default_difficulty.addItem(label, value)
+        self.game_default_difficulty.setCurrentIndex(max(0, self.game_default_difficulty.findData(store.values.game_default_difficulty)))
+        self.game_countdown_s = QSpinBox(); self.game_countdown_s.setRange(0, 10); self.game_countdown_s.setValue(store.values.game_countdown_s); self.game_countdown_s.setSuffix(" s")
+        self.game_calibration_s = QDoubleSpinBox(); self.game_calibration_s.setRange(0.0, 10.0); self.game_calibration_s.setSingleStep(0.25); self.game_calibration_s.setValue(store.values.game_calibration_s); self.game_calibration_s.setSuffix(" s")
+        self.game_target_period_scale = QDoubleSpinBox(); self.game_target_period_scale.setRange(0.5, 2.0); self.game_target_period_scale.setSingleStep(0.1); self.game_target_period_scale.setValue(store.values.game_target_period_scale); self.game_target_period_scale.setSuffix("×")
+        self.game_target_period_scale.setToolTip("Below 1× changes targets faster; above 1× gives the player more time.")
+        self.game_audio_cues = QCheckBox("Play target and success cues"); self.game_audio_cues.setChecked(store.values.game_audio_cues)
+        self.game_show_instructions = QCheckBox("Show live game instructions"); self.game_show_instructions.setChecked(store.values.game_show_instructions)
+        self.game_high_contrast_targets = QCheckBox("Use high-contrast targets"); self.game_high_contrast_targets.setChecked(store.values.game_high_contrast_targets)
+        self.game_auto_save_results = QCheckBox("Automatically save completed game results"); self.game_auto_save_results.setChecked(store.values.game_auto_save_results)
+        self.game_results_directory = QLineEdit(store.values.game_results_directory)
+        games_form.addRow("Default difficulty", self.game_default_difficulty)
+        games_form.addRow("Start countdown", self.game_countdown_s)
+        games_form.addRow("Calibration duration", self.game_calibration_s)
+        games_form.addRow("Target timing", self.game_target_period_scale)
+        games_form.addRow(self.game_audio_cues)
+        games_form.addRow(self.game_show_instructions)
+        games_form.addRow(self.game_high_contrast_targets)
+        games_form.addRow(self.game_auto_save_results)
+        games_form.addRow("Results folder", self._directory_row(self.game_results_directory, "Choose game results folder"))
+
+        background_page = QWidget(objectName="settingsPage"); tabs.addTab(background_page, "Hub background")
+        background_layout = QVBoxLayout(background_page)
+        background_form = QFormLayout()
+        self.hub_background_mode = QComboBox(); self.hub_background_mode.addItems(("Default", "Custom")); self.hub_background_mode.setCurrentText(store.values.hub_background_mode)
+        self.hub_artwork_style = QComboBox(); self.hub_artwork_style.addItems(("Focus Mode", "Professional")); self.hub_artwork_style.setCurrentText(store.values.hub_artwork_style)
+        self.hub_custom_background = QLineEdit(store.values.hub_custom_background); self.hub_custom_background.setReadOnly(True)
+        image_row = QWidget(); image_row_layout = QHBoxLayout(image_row); image_row_layout.setContentsMargins(0, 0, 0, 0)
+        image_row_layout.addWidget(self.hub_custom_background, 1)
+        choose_background = QPushButton("Choose image…"); choose_background.clicked.connect(self._browse_background)
+        clear_background = QPushButton("Use default"); clear_background.clicked.connect(self._clear_background)
+        image_row_layout.addWidget(choose_background); image_row_layout.addWidget(clear_background)
+        self.hub_background_blur = QCheckBox("Blur the background"); self.hub_background_blur.setChecked(store.values.hub_background_blur)
+        self.hub_background_blur_strength = QSpinBox(); self.hub_background_blur_strength.setRange(0, 30); self.hub_background_blur_strength.setValue(store.values.hub_background_blur_strength); self.hub_background_blur_strength.setSuffix(" px")
+        self.hub_background_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.hub_background_opacity.setRange(0, 100)
+        self.hub_background_opacity.setValue(round(store.values.hub_background_opacity * 100))
+        self.hub_background_opacity.setToolTip("Increase this to make the background artwork more visible.")
+        self.hub_background_opacity_value = QLabel()
+        opacity_row = QWidget(); opacity_layout = QHBoxLayout(opacity_row); opacity_layout.setContentsMargins(0, 0, 0, 0)
+        opacity_layout.addWidget(QLabel("Subtle")); opacity_layout.addWidget(self.hub_background_opacity, 1); opacity_layout.addWidget(QLabel("Bold")); opacity_layout.addWidget(self.hub_background_opacity_value)
+        self.hub_parallax_strength = QSlider(Qt.Orientation.Horizontal)
+        self.hub_parallax_strength.setRange(0, 100)
+        self.hub_parallax_strength.setValue(round(store.values.hub_parallax_strength * 100))
+        self.hub_parallax_strength.setToolTip("Sticky keeps the artwork anchored; Dynamic lets it travel more as the page scrolls.")
+        self.hub_parallax_value = QLabel()
+        parallax_row = QWidget(); parallax_layout = QHBoxLayout(parallax_row); parallax_layout.setContentsMargins(0, 0, 0, 0)
+        parallax_layout.addWidget(QLabel("Sticky")); parallax_layout.addWidget(self.hub_parallax_strength, 1); parallax_layout.addWidget(QLabel("Dynamic")); parallax_layout.addWidget(self.hub_parallax_value)
+        background_form.addRow("Artwork style", self.hub_artwork_style)
+        background_form.addRow("Background source", self.hub_background_mode)
+        background_form.addRow("Custom image", image_row)
+        background_form.addRow(self.hub_background_blur)
+        background_form.addRow("Blur strength", self.hub_background_blur_strength)
+        background_form.addRow("Background strength", opacity_row)
+        background_form.addRow("Scroll behavior", parallax_row)
+        background_layout.addLayout(background_form)
+        framing = QLabel("Drag the cyan rectangle to choose which part of the image remains visible after it fills the Hub window.", objectName="settingsHint")
+        framing.setWordWrap(True)
+        background_layout.addWidget(framing)
+        self.background_crop_preview = BackgroundCropPreview()
+        self.background_crop_preview.set_crop(store.values.hub_background_crop_x, store.values.hub_background_crop_y)
+        self.background_crop_preview.cropChanged.connect(self._background_crop_changed)
+        background_layout.addWidget(self.background_crop_preview)
+        self._refresh_background_preview()
+        self.hub_background_mode.currentTextChanged.connect(self._background_mode_changed)
+        self.hub_background_blur.toggled.connect(self.hub_background_blur_strength.setEnabled)
+        self.hub_background_opacity.valueChanged.connect(self._update_background_slider_labels)
+        self.hub_parallax_strength.valueChanged.connect(self._update_background_slider_labels)
+        self.hub_background_blur_strength.setEnabled(self.hub_background_blur.isChecked())
+        self._update_background_slider_labels()
+        self._background_mode_changed(self.hub_background_mode.currentText())
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+        for form in self.findChildren(QFormLayout):
+            form.setHorizontalSpacing(14)
+            form.setVerticalSpacing(12)
+        self._apply_style()
+
+    def _update_background_slider_labels(self, *_args) -> None:
+        self.hub_background_opacity_value.setText(f"{self.hub_background_opacity.value()}%")
+        movement = self.hub_parallax_strength.value()
+        if movement == 0:
+            label = "Sticky"
+        elif movement < 35:
+            label = "Gentle"
+        elif movement < 70:
+            label = "Balanced"
+        else:
+            label = "Dynamic"
+        self.hub_parallax_value.setText(f"{label} · {movement}%")
+
+    def _apply_style(self) -> None:
+        dark = self.store.values.theme in {"Dark", "High contrast"}
+        if dark:
+            window, panel, field = "#091426", "#101d33", "#16263f"
+            text, muted, border, accent = "#f5f7ff", "#b7c2d8", "#496384", "#36c9d8"
+        else:
+            window, panel, field = "#eef3f9", "#ffffff", "#f7f9fc"
+            text, muted, border, accent = "#15213d", "#63708a", "#cbd5e3", "#22bdd1"
+        self.settings_tab_bar.set_colors(
+            window=window, panel=panel, text=text, muted=muted, border=border, accent=accent,
+        )
+        self.setStyleSheet(f"""
+            QDialog {{ background: {window}; color: {text}; font-family: "Segoe UI"; }}
+            QWidget, QLabel, QCheckBox, QGroupBox {{ color: {text}; }}
+            QLabel#settingsTitle {{ font-size: 25px; font-weight: 800; }}
+            QLabel#settingsSubtitle, QLabel#settingsHint {{ color: {muted}; font-size: 13px; }}
+            QTabWidget#settingsTabs::pane {{ background: {panel}; border: 1px solid {border}; border-radius: 14px; }}
+            QTabBar::tab {{ color: {muted}; background: {window}; border: 1px solid {border}; min-width: 180px; padding: 12px 14px; text-align: left; }}
+            QTabBar::tab:selected {{ color: {text}; background: {panel}; border-left: 4px solid {accent}; font-weight: 700; }}
+            QTabBar::tab:hover {{ color: {text}; border-color: {accent}; }}
+            QWidget#settingsPage {{ background: {panel}; }}
+            QScrollArea, QScrollArea > QWidget > QWidget {{ background: {panel}; border: none; }}
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget {{ color: {text}; background: {field}; border: 1px solid {border}; border-radius: 9px; padding: 7px 9px; selection-background-color: {accent}; }}
+            QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{ color: {muted}; background: {window}; }}
+            QComboBox QAbstractItemView {{ color: {text}; background: {panel}; border: 1px solid {border}; selection-background-color: {accent}; selection-color: #07152f; }}
+            QPushButton {{ color: {text}; background: {field}; border: 1px solid {border}; border-radius: 9px; min-height: 22px; padding: 8px 12px; }}
+            QPushButton:hover {{ border-color: {accent}; }}
+            QPushButton:default, QDialogButtonBox QPushButton {{ background: {accent}; color: #07152f; font-weight: 700; }}
+            QToolTip {{ color: {text}; background: {panel}; border: 1px solid {accent}; }}
+            QSlider::groove:horizontal {{ background: {border}; height: 6px; border-radius: 3px; }}
+            QSlider::sub-page:horizontal {{ background: {accent}; border-radius: 3px; }}
+            QSlider::handle:horizontal {{ background: {panel}; border: 2px solid {accent}; width: 18px; margin: -7px 0; border-radius: 9px; }}
+            QSlider::handle:horizontal:hover {{ background: {accent}; }}
+            QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px; }}
+            QScrollBar::handle:vertical {{ background: {accent}; min-height: 35px; border-radius: 5px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        """)
+
+    def _default_background_path(self) -> str:
+        dark = self.store.values.theme in {"Dark", "High contrast"}
+        return str(HUB_BACKGROUND_DIR / ("dark.png" if dark else "light.png"))
+
+    def _refresh_background_preview(self) -> None:
+        custom = self.hub_custom_background.text().strip()
+        path = custom if self.hub_background_mode.currentText() == "Custom" and Path(custom).is_file() else self._default_background_path()
+        self.background_crop_preview.set_image(path)
+
+    def _background_mode_changed(self, mode: str) -> None:
+        self.hub_custom_background.setEnabled(mode == "Custom")
+        self._refresh_background_preview()
+
+    def _browse_background(self) -> None:
+        start = self.hub_custom_background.text().strip() or self.store.values.default_source_directory
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose Hub background", start,
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)",
+        )
+        if path:
+            self.hub_custom_background.setText(path)
+            self.hub_background_mode.setCurrentText("Custom")
+            self._refresh_background_preview()
+
+    def _clear_background(self) -> None:
+        self.hub_custom_background.clear()
+        self.hub_background_mode.setCurrentText("Default")
+        self._refresh_background_preview()
+
+    def _background_crop_changed(self, x: float, y: float) -> None:
+        # The preview owns the normalized values; this slot exists so future
+        # live-preview consumers can subscribe without changing the widget API.
+        self.background_crop_preview.crop_x = x
+        self.background_crop_preview.crop_y = y
 
     def _directory_row(self, edit: QLineEdit, title: str) -> QWidget:
         row = QWidget()
@@ -573,6 +1158,24 @@ class PreferencesDialog(QDialog):
             # Keep the legacy value readable so old settings files remain
             # compatible, but the retired Galaxy layout is no longer exposed.
             hub_galaxy_mode=False,
+            hub_background_mode=self.hub_background_mode.currentText(),
+            hub_custom_background=self.hub_custom_background.text().strip(),
+            hub_background_blur=self.hub_background_blur.isChecked(),
+            hub_background_blur_strength=self.hub_background_blur_strength.value(),
+            hub_background_opacity=self.hub_background_opacity.value() / 100,
+            hub_parallax_strength=self.hub_parallax_strength.value() / 100,
+            hub_background_crop_x=self.background_crop_preview.crop_x,
+            hub_background_crop_y=self.background_crop_preview.crop_y,
+            hub_artwork_style=self.hub_artwork_style.currentText(),
+            game_default_difficulty=self.game_default_difficulty.currentData(),
+            game_countdown_s=self.game_countdown_s.value(),
+            game_audio_cues=self.game_audio_cues.isChecked(),
+            game_show_instructions=self.game_show_instructions.isChecked(),
+            game_high_contrast_targets=self.game_high_contrast_targets.isChecked(),
+            game_auto_save_results=self.game_auto_save_results.isChecked(),
+            game_results_directory=self.game_results_directory.text().strip(),
+            game_target_period_scale=self.game_target_period_scale.value(),
+            game_calibration_s=self.game_calibration_s.value(),
             arrow_keys_navigate=self.arrow_keys_navigate.isChecked(),
             loop_selected_interval=self.loop_selected_interval.isChecked(),
             pause_at_annotation_boundary=self.pause_at_annotation_boundary.isChecked(),
@@ -591,6 +1194,7 @@ class PreferencesDialog(QDialog):
             generate_graph_previews=self.generate_graph_previews.isChecked(),
             export_graph_images=self.export_graph_images.isChecked(),
             output_versioning=self.output_versioning.currentText(),
+            minimum_free_storage_gib=self.minimum_free_storage_gib.value(),
             default_annotation_layer=self.default_annotation_layer.currentText(),
             default_activity_state=self.default_activity_state.currentText(),
             default_phase_schema=self.default_phase_schema.text().strip(),

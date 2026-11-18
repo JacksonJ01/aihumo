@@ -14,7 +14,11 @@ if not (project_root / "main.py").is_file():
 datas = [
     (str(project_root / "configs" / "config.json"), "configs"),
     (str(project_root / "configs" / "movement_games.json"), "configs"),
+    (str(project_root / "assets" / "app_branding"), "assets/app_branding"),
+    (str(project_root / "assets" / "hub_backgrounds"), "assets/hub_backgrounds"),
     (str(project_root / "assets" / "hub_cards"), "assets/hub_cards"),
+    (str(project_root / "assets" / "hub_cards_v2"), "assets/hub_cards_v2"),
+    (str(project_root / "assets" / "hub_cards_professional"), "assets/hub_cards_professional"),
     (str(project_root / "full_model" / "pose_landmarker_full.task"), "full_model"),
 ]
 binaries = []
@@ -80,6 +84,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(project_root / "assets" / "app_branding" / "aihumo_logo_v5.ico"),
     contents_directory=".",
 )
 
@@ -99,7 +104,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="AIHuMo Data Studio.app",
-        icon=None,
+        icon=str(project_root / "assets" / "app_branding" / "aihumo_logo_v5.icns"),
         bundle_identifier="org.aihumo.datastudio",
         info_plist={
             "CFBundleDisplayName": "AIHuMo Data Studio",

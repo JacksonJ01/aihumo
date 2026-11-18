@@ -29,7 +29,8 @@ from .angle_overlay import SKELETON_COLUMNS, AngleLabel, frame_angle_labels, mid
 from .common import ReviewWindow, close_and_return
 from .joint_graph import GRAPH_MODES, MEAN_SOURCE, JointGraphWidget, SAVED_SOURCE, TORSO_SOURCE, WORLD_SOURCE
 from .playback import FrameBuffer, FrameNavigationButton, FramePlayback, open_review_video, review_window_is_covered
-from .preferences import DEFAULT_FRAME_JUMP, MAX_FRAME_JUMP
+from .preferences import DEFAULT_FRAME_JUMP, MAX_FRAME_JUMP, PreferencesDialog
+from .subapp_style import subapp_stylesheet
 from .timeline_layers import QUALITY_COLUMNS
 
 
@@ -119,6 +120,8 @@ class InteractiveGraphViewer(ReviewWindow):
         while owner is not None and not hasattr(owner, "preferences"):
             owner = owner.parentWidget()
         self._preference_store = getattr(owner, "preferences", None)
+        if self._preference_store is not None:
+            self.setStyleSheet(subapp_stylesheet(self._preference_store.values.theme))
         self._checkpoint_timer = QTimer(self)
         self._checkpoint_timer.setSingleShot(True)
         self._checkpoint_timer.setInterval(750)
@@ -206,6 +209,12 @@ class InteractiveGraphViewer(ReviewWindow):
     def _back(self):
         close_and_return(self)
 
+    def open_settings(self) -> None:
+        if self._preference_store is None:
+            return
+        if PreferencesDialog(self._preference_store, self).exec() == QDialog.DialogCode.Accepted:
+            self.setStyleSheet(subapp_stylesheet(self._preference_store.values.theme))
+
     def _build_preview(self):
         return SkeletonPreview(self._paint_skeleton)
 
@@ -231,6 +240,10 @@ class InteractiveGraphViewer(ReviewWindow):
         self.back_button.setToolTip("Close the graph viewer and return to the previous window (Esc).")
         self.back_button.clicked.connect(self._back)
         video_header.addWidget(self.back_button)
+        if self._preference_store is not None:
+            self.settings_button = QPushButton("Settings")
+            self.settings_button.clicked.connect(self.open_settings)
+            video_header.addWidget(self.settings_button)
         video_header.addStretch(1)
         self.overlay_button = QPushButton("Display Overlay")
         self.overlay_button.setCheckable(True)
@@ -354,21 +367,38 @@ class InteractiveGraphViewer(ReviewWindow):
     def _refresh_graph_annotations(self, graph):
         path = (Path(self._annotation_path_override) if self._annotation_path_override
                 else annotation_json_for_features(self.parquet_path))
+        suggestions_path = (
+            Path(self.metadata["annotation_suggestions"])
+            if self.metadata.get("annotation_suggestions") else None
+        )
         try:
             try:
                 stat = path.stat()
-                version = path, stat.st_mtime_ns, stat.st_size
+                annotation_version = (path, stat.st_mtime_ns, stat.st_size)
             except FileNotFoundError:
-                version = path, None
+                annotation_version = (path, None)
+            try:
+                suggestion_stat = suggestions_path.stat() if suggestions_path is not None else None
+                suggestion_version = (
+                    suggestions_path, suggestion_stat.st_mtime_ns, suggestion_stat.st_size
+                ) if suggestion_stat is not None else (suggestions_path, None)
+            except FileNotFoundError:
+                suggestion_version = (suggestions_path, None)
+            version = annotation_version, suggestion_version
             if graph is self._annotation_graph and version == self._annotation_revision:
                 return
-            rows = AnnotationState.load(path, self.metadata).annotations if len(version) == 3 else []
+            rows = AnnotationState.load(path, self.metadata).annotations if len(annotation_version) == 3 else []
             graph.set_annotations(rows)
+            if suggestions_path and suggestions_path.is_file():
+                graph.set_suggestions(load_json(suggestions_path).get("suggestions", []))
+            else:
+                graph.set_suggestions([])
             self._annotation_graph = graph
             self._annotation_revision = version
         except (OSError, ValueError, TypeError, KeyError):
             logging.getLogger(__name__).exception("Could not read graph annotations from %s", path)
             graph.set_annotations([])
+            graph.set_suggestions([])
             graph.annotation_hint.setText("Could not read saved annotations")
 
     def _decode(self, index: int) -> QPixmap:

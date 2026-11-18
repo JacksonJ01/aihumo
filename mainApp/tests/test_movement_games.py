@@ -5,13 +5,17 @@ import pandas as pd
 import pytest
 
 from app.movement_games import (
+    GAME_VARIANTS,
     MovementGameDialog,
     MovementGameEngine,
     feature_pair_for_parquet,
+    game_variant_definitions,
     load_feature_recording,
     load_game_definitions,
 )
+from app.preferences import DesktopPreferences, PreferenceStore
 from aihumo.game_engine import LoopState
+from PyQt6.QtWidgets import QDialog
 
 
 def game_frame(count=90):
@@ -31,18 +35,51 @@ def game_frame(count=90):
     })
 
 
+def test_movement_games_share_settings_and_refresh_theme(qt_app, tmp_path, monkeypatch):
+    store = PreferenceStore(tmp_path / "settings.json")
+    store.save(DesktopPreferences(theme="Light", setup_completed=True))
+    dialog = MovementGameDialog("flow_zone", preferences=store)
+    try:
+        assert dialog.preference_store is store
+        assert dialog.settings_button.isEnabled()
+        assert "#f5f7fb" in dialog.styleSheet()
+        store.save(DesktopPreferences(theme="Dark", game_high_contrast_targets=True, setup_completed=True))
+        monkeypatch.setattr("app.movement_games.PreferencesDialog.exec", lambda _self: QDialog.DialogCode.Accepted)
+        dialog.open_settings()
+        assert dialog.preferences.theme == "Dark"
+        assert dialog.canvas.high_contrast
+        assert "#091426" in dialog.styleSheet()
+    finally:
+        dialog.close()
+
+
 def test_game_catalog_contains_all_hub_modes():
     games = load_game_definitions()
-    assert len(games) >= 16
-    assert {game.id for game in games} >= {
-        "just_dance", "target_grid_6", "mirror", "path", "reaction", "freeze", "avoid",
-        "rhythm", "obstacle", "sequence", "balance", "partner", "sports",
-        "rehab", "ergonomics", "gait",
+    assert len(games) == 10
+    assert {game.id for game in games} == {
+        "just_dance", "flow_zone", "mirror_match", "balance", "path_precision",
+        "sports", "rehab", "ergonomics", "gait", "sequence",
     }
     assert len({game.id for game in games}) == len(games)
     assert len({game.title for game in games}) == len(games)
     assert len({game.rule for game in games}) == len(games)
     assert all(game.description.strip() and game.objective.strip() for game in games)
+
+
+def test_consolidated_games_preserve_every_legacy_mechanic():
+    games = load_game_definitions()
+    rules = {
+        variant.rule
+        for definition in games
+        for variant in GAME_VARIANTS[definition.id]
+    }
+    assert rules == {
+        "dance", "rhythm", "partner", "target_grid", "target_grid_12",
+        "reaction_targets", "avoid_zone", "obstacle_dodge", "mirror",
+        "freeze_pose", "balance", "path_follow", "sports_reaction",
+        "rehab", "ergonomics", "gait", "sequence",
+    }
+    assert all(1 <= len(GAME_VARIANTS[definition.id]) <= 5 for definition in games)
 
 
 def test_all_game_rules_consume_one_shared_feature_table(tmp_path):
@@ -120,36 +157,30 @@ def test_every_game_loop_runs_to_completion_and_exports_summary():
         json.dumps(summary.to_document())
 
 
-def test_every_game_exposes_a_distinct_instruction_and_mechanic():
+def test_every_game_variant_exposes_an_instruction_and_valid_score():
     frame = game_frame()
     frame["_game_time_s"] = frame["timestamp_s"]
     frame["_game_frame_id"] = frame["frame_id"]
-    instructions = {}
-    scores = {}
     for definition in load_game_definitions():
-        engine = MovementGameEngine(definition, frame, difficulty="medium", partner_frame=frame.copy())
-        result = engine.preview(50)
-        instructions[definition.id] = result["instruction"]
-        scores[definition.id] = result["score"]
-        assert result["state"] == LoopState.READY.value
-        assert len(result["position"]) == 2
-        assert len(result["target"]) == 2
-        assert isinstance(result["success"], bool)
-    assert len(set(instructions.values())) == len(instructions)
-    for family in (
-        ("just_dance", "rhythm"),
-        ("target_grid_6", "target_grid_12", "reaction"),
-        ("avoid", "obstacle"),
-        ("mirror", "partner"),
-    ):
-        assert len({scores[game_id] for game_id in family}) > 1, family
+        variants = game_variant_definitions(definition)
+        assert len(variants) == len(GAME_VARIANTS[definition.id])
+        for variant, configured in zip(GAME_VARIANTS[definition.id], variants, strict=True):
+            engine = MovementGameEngine(configured, frame, difficulty="medium", partner_frame=frame.copy())
+            result = engine.preview(50)
+            assert result["instruction"], (definition.id, variant.title)
+            assert 0 <= result["score"] <= 1
+            assert result["state"] == LoopState.READY.value
+            assert len(result["position"]) == 2
+            assert len(result["target"]) == 2
+            assert isinstance(result["success"], bool)
 
 
 def test_pause_seek_and_preview_do_not_duplicate_scores():
     frame = game_frame(30)
     frame["_game_time_s"] = frame["timestamp_s"]
     frame["_game_frame_id"] = frame["frame_id"]
-    definition = next(game for game in load_game_definitions() if game.id == "reaction")
+    definition = next(game for game in load_game_definitions() if game.id == "flow_zone")
+    definition = game_variant_definitions(definition)[2]
     engine = MovementGameEngine(definition, frame)
     first_scored = engine.calibration_frames
     engine.start(from_index=first_scored)
@@ -177,7 +208,7 @@ def test_targets_follow_source_time_not_frame_count():
                                       1.2, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0])
     frame["_game_time_s"] = frame["timestamp_s"]
     frame["_game_frame_id"] = frame["frame_id"]
-    definition = next(game for game in load_game_definitions() if game.id == "target_grid_6")
+    definition = next(game for game in load_game_definitions() if game.id == "flow_zone")
     engine = MovementGameEngine(definition, frame, seed=3)
     assert engine.preview(0)["target_slot"] == 0
     assert engine.preview(8)["target_slot"] == 0
@@ -193,7 +224,8 @@ def test_partner_and_mirror_backend_accepts_second_feature_stream():
     mismatched = primary.copy()
     for column in [name for name in mismatched if name.startswith("angle_3d_")]:
         mismatched[column] = np.clip(mismatched[column] + 55, 0, 180)
-    definition = next(game for game in load_game_definitions() if game.id == "partner")
+    definition = next(game for game in load_game_definitions() if game.id == "mirror_match")
+    definition = game_variant_definitions(definition)[2]
     matching_score = MovementGameEngine(definition, primary, partner_frame=matching).preview(10)["score"]
     mismatched_score = MovementGameEngine(definition, primary, partner_frame=mismatched).preview(10)["score"]
     assert matching_score > mismatched_score
@@ -203,7 +235,7 @@ def test_desktop_game_controls_drive_backend_loop(qt_app):
     frame = game_frame(12)
     frame["_game_time_s"] = frame["timestamp_s"]
     frame["_game_frame_id"] = frame["frame_id"]
-    dialog = MovementGameDialog("target_grid_6")
+    dialog = MovementGameDialog("flow_zone")
     try:
         dialog.engine = MovementGameEngine(dialog.definition, frame)
         dialog.frame_slider.setRange(0, len(frame) - 1)
@@ -221,6 +253,101 @@ def test_desktop_game_controls_drive_backend_loop(qt_app):
         dialog.reset_game()
         assert dialog.engine.state == LoopState.READY
         assert dialog.progress.value() > 0
+    finally:
+        dialog.close()
+
+
+def test_consolidated_dialog_switches_challenges_without_losing_recording(qt_app):
+    frame = game_frame(24)
+    frame["_game_time_s"] = frame["timestamp_s"]
+    frame["_game_frame_id"] = frame["frame_id"]
+    dialog = MovementGameDialog("flow_zone")
+    try:
+        dialog.engine = dialog._create_engine(dialog.definition, frame)
+        assert dialog.variant_combo.count() == 5
+        assert dialog.definition.rule == "target_grid"
+        dialog.variant_combo.setCurrentIndex(3)
+        assert dialog.selected_variant.title == "Avoid the Zone"
+        assert dialog.definition.rule == "avoid_zone"
+        assert dialog.engine is not None
+        assert dialog.engine.definition.rule == "avoid_zone"
+        assert "Avoid the Zone" in dialog.title_label.text()
+    finally:
+        dialog.close()
+
+
+def test_obstacle_challenge_opens_maximized_keyboard_prototype(qt_app, monkeypatch):
+    opened = []
+
+    class FakeLaneDodgeDialog:
+        def __init__(self, parent=None, *, preferences=None):
+            opened.append(("created", parent, preferences))
+
+        def setWindowFlag(self, flag, enabled=True):
+            opened.append(("flag", flag, enabled))
+
+        def showMaximized(self):
+            opened.append(("maximized",))
+
+        def exec(self):
+            opened.append(("executed",))
+
+    monkeypatch.setattr("app.movement_games.LaneDodgeDialog", FakeLaneDodgeDialog)
+    dialog = MovementGameDialog("flow_zone")
+    try:
+        assert dialog.live_dodge_button.isHidden()
+        dialog.variant_combo.setCurrentIndex(4)
+        assert dialog.definition.rule == "obstacle_dodge"
+        assert not dialog.live_dodge_button.isHidden()
+        dialog.live_dodge_button.click()
+        assert opened[0][0] == "created"
+        assert ("maximized",) in opened and ("executed",) in opened
+    finally:
+        dialog.close()
+
+
+def test_game_preferences_configure_loop_feedback_and_results(qt_app, tmp_path):
+    frame = game_frame(18)
+    frame["_game_time_s"] = frame["timestamp_s"]
+    frame["_game_frame_id"] = frame["frame_id"]
+    preferences = DesktopPreferences(
+        game_default_difficulty="hard",
+        game_countdown_s=2,
+        game_audio_cues=False,
+        game_show_instructions=False,
+        game_high_contrast_targets=True,
+        game_auto_save_results=True,
+        game_results_directory=str(tmp_path),
+        game_target_period_scale=0.5,
+        game_calibration_s=2.25,
+    )
+    dialog = MovementGameDialog("flow_zone", preferences=preferences)
+    try:
+        original_period = dialog.definition.target_period_s
+        dialog.engine = dialog._create_engine(dialog.definition, frame)
+        dialog.path_edit.setText(str(tmp_path / "session_features.parquet"))
+        dialog.frame_slider.setRange(0, len(frame) - 1)
+        dialog.frame_slider.setEnabled(True)
+        assert dialog.difficulty_combo.currentData() == "hard"
+        assert dialog.canvas.high_contrast is True
+        assert dialog.engine.definition.target_period_s == pytest.approx(original_period * 0.5)
+        assert dialog.engine.definition.calibration_s == pytest.approx(2.25)
+
+        dialog.toggle_play()
+        assert dialog.countdown_timer.isActive()
+        assert dialog.start_button.isEnabled() is False
+        dialog._countdown_tick()
+        dialog._countdown_tick()
+        dialog.timer.stop()
+        assert dialog.engine.state in (LoopState.CALIBRATING, LoopState.RUNNING)
+        dialog.render_frame(0)
+        assert " | " in dialog.status.text()
+        assert "Move into" not in dialog.status.text()
+
+        dialog._auto_save_results()
+        result_path = tmp_path / "session_flow_zone_results.json"
+        assert result_path.is_file()
+        assert json.loads(result_path.read_text(encoding="utf-8"))["game_id"] == "flow_zone"
     finally:
         dialog.close()
 

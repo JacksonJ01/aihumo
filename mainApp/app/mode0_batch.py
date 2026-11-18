@@ -12,6 +12,7 @@ recordings or creating one ambiguous Parquet file for several videos.
 import logging
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,9 +47,18 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from aihumo.config import load_config
+from aihumo.batch_manifest import BatchManifest
 from aihumo.processing import process_video, processing_job_status
-from .preferences import ParticipantPicker, PreferenceStore
+from aihumo.performance import observed_processing_fps
+from aihumo.resource_estimation import (
+    PROFILES, DiskSpaceGuard, InsufficientStorageError, apply_processing_profile,
+    estimate_processing_resources, estimate_video_peak_bytes,
+)
+from .preflight import PreflightDialog, format_bytes, format_duration
+from .preferences import ParticipantPicker, PreferenceStore, PreferencesDialog
+from .app_paths import default_processed_root, user_data_dir
 from .processing_resume import processing_fields, restore_processing_fields
+from .subapp_style import fit_window_to_available_screen, subapp_stylesheet
 from .trim_subvideos import processed_inventory
 
 LOGGER = logging.getLogger("AIHuMoDataStudio.Mode0Batch")
@@ -126,15 +136,52 @@ class BatchRecording:
 
 
 class BatchProcessingWorker(QObject):
-    progress = pyqtSignal(float, str)
+    progress = pyqtSignal(float, float, str)
+    stage_progress = pyqtSignal(object)
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
     cancelled = pyqtSignal(str)
+    paused = pyqtSignal(str)
 
-    def __init__(self, jobs: list[dict[str, Any]]):
+    def __init__(
+        self,
+        jobs: list[dict[str, Any]],
+        frame_weights: list[float] | None = None,
+        *,
+        manifest_path: str | Path | None = None,
+        projected_peak_bytes: list[int] | None = None,
+    ):
         super().__init__()
         self.jobs = jobs
+        supplied = frame_weights or [1] * len(jobs)
+        if len(supplied) != len(jobs):
+            raise ValueError("Batch frame weights must match the number of jobs.")
+        self.frame_weights = [max(1.0, float(weight)) for weight in supplied]
+        self.manifest_path = Path(manifest_path) if manifest_path is not None else None
+        supplied_peaks = projected_peak_bytes or [0] * len(jobs)
+        if len(supplied_peaks) != len(jobs):
+            raise ValueError("Projected peak estimates must match the number of jobs.")
+        self.projected_peak_bytes = [max(0, int(value)) for value in supplied_peaks]
         self.cancel_requested = False
+
+    @staticmethod
+    def _duration_text(seconds: float | None) -> str:
+        if seconds is None or seconds < 0 or not float(seconds) < float("inf"):
+            return "calculating…"
+        rounded = int(round(seconds))
+        hours, remainder = divmod(rounded, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours}h {minutes:02d}m"
+        if minutes:
+            return f"{minutes}m {secs:02d}s"
+        return f"{secs}s"
+
+    @staticmethod
+    def _eta(elapsed: float, fraction: float) -> float | None:
+        if elapsed < 0.25 or fraction < 0.01:
+            return None
+        return elapsed * max(0.0, 1.0 - fraction) / max(fraction, 1e-9)
 
     def cancel(self) -> None:
         self.cancel_requested = True
@@ -142,27 +189,132 @@ class BatchProcessingWorker(QObject):
     def run(self) -> None:
         results = []
         total = max(1, len(self.jobs))
+        total_weight = max(1, sum(self.frame_weights))
+        completed_weight = 0
+        completed_output_bytes = 0
+        batch_started = time.monotonic()
+        manifest: BatchManifest | None = None
+        active_index: int | None = None
         try:
+            if self.manifest_path is not None:
+                manifest = BatchManifest.load(self.manifest_path)
+            if manifest is not None:
+                manifest.set_batch_status("running")
             for index, job in enumerate(self.jobs):
                 if self.cancel_requested:
                     raise InterruptedError("Batch processing was cancelled before the next recording.")
                 name = f"{job['identifiers']['session_id']}/{job['identifiers']['video_id']}"
+                reserve = max(0, int(job.get("disk_safety_margin_bytes", 0)))
+                if job.get("output_root") is not None:
+                    try:
+                        DiskSpaceGuard(job["output_root"], minimum_free_bytes=reserve).check_projected(
+                            self.projected_peak_bytes[index], name,
+                        )
+                    except InsufficientStorageError as exc:
+                        if manifest is not None:
+                            manifest.update_job(
+                                index, status="paused_storage", stage="queued", error=str(exc),
+                            )
+                            manifest.set_batch_status("paused_storage")
+                        self.paused.emit(str(exc))
+                        return
+                active_index = index
+                weight = self.frame_weights[index]
+                video_started = time.monotonic()
+                last_manifest_update = 0.0
+                last_manifest_stage: str | None = None
+                if manifest is not None:
+                    manifest.update_job(index, status="running", stage="inspection_and_decoding")
 
-                def on_progress(fraction: float, message: str, *, base=index) -> None:
-                    overall = (base + max(0.0, min(1.0, fraction))) / total
-                    self.progress.emit(overall, f"{name}: {message}")
+                def emit_progress(fraction: float, message: str) -> None:
+                    current = max(0.0, min(1.0, fraction))
+                    overall = (completed_weight + weight * current) / total_weight
+                    now = time.monotonic()
+                    current_eta = self._eta(now - video_started, current)
+                    batch_eta = self._eta(now - batch_started, overall)
+                    summary = (
+                        f"Video {index + 1}/{total} · {name} · Current {current * 100:.1f}% "
+                        f"(ETA {self._duration_text(current_eta)}) · Batch {overall * 100:.1f}% "
+                        f"(ETA {self._duration_text(batch_eta)})"
+                    )
+                    self.progress.emit(overall, current, f"{summary}\n{message}")
 
+                def on_progress(fraction: float, message: str) -> None:
+                    emit_progress(fraction, message)
+
+                def on_stage_progress(progress) -> None:
+                    nonlocal last_manifest_update, last_manifest_stage
+                    current = max(0.0, min(1.0, progress.video_fraction))
+                    overall = (completed_weight + weight * current) / total_weight
+                    self.stage_progress.emit({
+                        "video_index": index + 1,
+                        "video_total": total,
+                        "video_name": name,
+                        "overall_fraction": overall,
+                        "progress": progress,
+                    })
+                    now = time.monotonic()
+                    stage_changed = progress.stage != last_manifest_stage
+                    if manifest is not None and (stage_changed or now - last_manifest_update >= 2.0 or current >= 1.0):
+                        manifest.update_job(
+                            index,
+                            stage=progress.stage,
+                            progress=current,
+                            completed_stage=(last_manifest_stage if stage_changed else None),
+                        )
+                        last_manifest_update = now
+                        last_manifest_stage = progress.stage
+
+                emit_progress(0.0, "Preparing recording")
                 result = process_video(
                     **job,
                     progress_callback=on_progress,
+                    stage_progress_callback=on_stage_progress,
                     cancel_check=lambda: self.cancel_requested,
                 )
                 results.append(result)
+                result_output_dir = getattr(result, "output_dir", None)
+                actual_output_bytes = sum(
+                    path.stat().st_size
+                    for path in Path(result_output_dir).rglob("*")
+                    if path.is_file() and ".processing" not in path.parts
+                ) if result_output_dir is not None else 0
+                completed_output_bytes += actual_output_bytes
+                if manifest is not None:
+                    manifest.update_job(
+                        index,
+                        status="completed",
+                        stage="completed",
+                        progress=1.0,
+                        completed_stage=last_manifest_stage,
+                        result=result,
+                    )
+                emit_progress(
+                    1.0,
+                    f"Recording complete and validated · Actual output {actual_output_bytes / (1024 ** 2):.1f} MB "
+                    f"· Completed batch outputs {completed_output_bytes / (1024 ** 2):.1f} MB",
+                )
+                completed_weight += weight
+                active_index = None
+            if manifest is not None:
+                manifest.set_batch_status("completed")
             self.finished.emit(results)
         except InterruptedError as exc:
+            if manifest is not None:
+                if active_index is not None:
+                    manifest.update_job(active_index, status="cancelled", error=str(exc))
+                manifest.set_batch_status("cancelled")
             self.cancelled.emit(str(exc))
         except Exception as exc:
             LOGGER.exception("Batch video processing failed")
+            if manifest is not None:
+                if active_index is not None:
+                    manifest.update_job(
+                        active_index,
+                        status="failed",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                manifest.set_batch_status("failed")
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
@@ -173,8 +325,12 @@ class BatchSessionDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("AIHuMo — Process Multiple Session Folders")
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint)
-        self.resize(900, 820)
-        self.setWindowState(Qt.WindowState.WindowMaximized)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint)
+        fit_window_to_available_screen(
+            self, preferred=(1080, 760), minimum=(760, 520), coverage=(0.90, 0.86)
+        )
+        self.preferences = preferences or PreferenceStore(user_data_dir() / "settings.json")
+        self.setStyleSheet(subapp_stylesheet(self.preferences.values.theme))
         self.results: list[Any] = []
         self.thread: QThread | None = None
         self.worker: BatchProcessingWorker | None = None
@@ -242,7 +398,6 @@ class BatchSessionDialog(QDialog):
         body.addWidget(self.recording_table)
 
         form = QFormLayout()
-        self.preferences = preferences or PreferenceStore(PROJECT_ROOT / ".aihumo" / "settings.json")
         self.participant_picker = ParticipantPicker(self.preferences)
         self.participant_edit = self.participant_picker.edit
         self.camera_id_edit = QLineEdit(self.preferences.values.default_camera_name or "camera_01")
@@ -261,8 +416,12 @@ class BatchSessionDialog(QDialog):
         self.model_edit = QLineEdit()
         self.output_edit = QLineEdit(
             self.preferences.values.default_output_directory
-            or str(PROJECT_ROOT / "data" / "processed")
+            or str(default_processed_root())
         )
+        self.profile_combo = QComboBox()
+        for profile in PROFILES.values():
+            self.profile_combo.addItem(profile.title, profile.id)
+        self.profile_combo.setCurrentIndex(self.profile_combo.findData("standard"))
         self.open_mode1_check = QCheckBox("Open the first completed recording in Mode 1")
         self.open_mode1_check.setChecked(True)
         form.addRow("Participant ID*", self.participant_picker)
@@ -276,6 +435,7 @@ class BatchSessionDialog(QDialog):
         form.addRow("Shared notes", self.notes_edit)
         form.addRow("MediaPipe model", self._browse_row(self.model_edit, self.browse_model, "MediaPipe Task (*.task);;All Files (*)"))
         form.addRow("Output root", self._browse_row(self.output_edit, self.browse_output, ""))
+        form.addRow("Output profile", self.profile_combo)
         self.processed_inventory_label = QLabel()
         self.processed_inventory_label.setWordWrap(True)
         form.addRow("Processed inventory", self.processed_inventory_label)
@@ -285,13 +445,32 @@ class BatchSessionDialog(QDialog):
         self.status = QLabel("Add at least one session folder and provide the participant ID.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 1000)
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
+        self.current_progress_bar = QProgressBar()
+        self.current_progress_bar.setRange(0, 1000)
+        self.current_progress_bar.setValue(0)
+        self.current_progress_bar.setFormat("Current video: %p%")
+        layout.addWidget(self.current_progress_bar)
+        self.stage_progress_bar = QProgressBar()
+        self.stage_progress_bar.setRange(0, 1000)
+        self.stage_progress_bar.setValue(0)
+        self.stage_progress_bar.setFormat("Current stage: %p%")
+        layout.addWidget(self.stage_progress_bar)
+        self.batch_progress_bar = QProgressBar()
+        self.batch_progress_bar.setRange(0, 1000)
+        self.batch_progress_bar.setValue(0)
+        self.batch_progress_bar.setFormat("Overall batch: %p%")
+        layout.addWidget(self.batch_progress_bar)
+        self.progress_metrics = QLabel("")
+        self.progress_metrics.setWordWrap(True)
+        layout.addWidget(self.progress_metrics)
+        # Backward-compatible alias for code that previously addressed the
+        # single aggregate progress bar.
+        self.progress_bar = self.batch_progress_bar
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Process folders")
+        self.settings_button = self.buttons.addButton("Settings", QDialogButtonBox.ButtonRole.ActionRole)
+        self.settings_button.clicked.connect(self.open_settings)
         self.buttons.accepted.connect(self.start_processing)
         self.buttons.rejected.connect(self.cancel_or_close)
         layout.addWidget(self.buttons)
@@ -302,6 +481,10 @@ class BatchSessionDialog(QDialog):
         self.output_edit.textChanged.connect(self.refresh_processed_inventory)
         self.refresh_processed_inventory()
         self.refresh_recording_table()
+
+    def open_settings(self) -> None:
+        if PreferencesDialog(self.preferences, self).exec() == QDialog.DialogCode.Accepted:
+            self.setStyleSheet(subapp_stylesheet(self.preferences.values.theme))
 
     @staticmethod
     def _browse_row(edit: QLineEdit, callback, file_filter: str):
@@ -512,8 +695,11 @@ class BatchSessionDialog(QDialog):
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Configuration error", str(exc))
             return
+        profile_id = str(self.profile_combo.currentData() or "standard")
+        effective_cfg = apply_processing_profile(cfg, profile_id)
         optional = self._shared_metadata()
         jobs: list[dict[str, Any]] = []
+        frame_weights: list[float] = []
         conflicts: list[str] = []
         recordings = self._recordings_from_table()
         seen_outputs: set[tuple[str, str]] = set()
@@ -535,7 +721,7 @@ class BatchSessionDialog(QDialog):
                 status = processing_job_status(
                     source_video=recording.source_video,
                     model_path=model_path,
-                    cfg=cfg,
+                    cfg=effective_cfg,
                     output_root=output_root,
                     session_id=recording.session_id,
                     video_id=recording.video_id,
@@ -547,10 +733,11 @@ class BatchSessionDialog(QDialog):
             if status["status"] not in {"new", "resumable", "complete"}:
                 conflicts.append(f"{job_name}: {status.get('message', status['status'])}")
                 continue
+            frame_weights.append(1.0)
             jobs.append({
                 "source_video": recording.source_video,
                 "model_path": model_path,
-                "cfg": cfg,
+                "cfg": effective_cfg,
                 "identifiers": identifiers,
                 "optional_metadata": {
                     **optional,
@@ -561,6 +748,7 @@ class BatchSessionDialog(QDialog):
                 "output_root": output_root,
                 "skeleton_line_color": self.preferences.values.skeleton_line,
                 "skeleton_joint_color": self.preferences.values.skeleton_joint,
+                "processing_profile_name": profile_id,
             })
         if conflicts:
             QMessageBox.critical(self, "Processing conflicts", "No files were started because these outputs conflict:\n\n" + "\n".join(conflicts[:12]))
@@ -569,27 +757,117 @@ class BatchSessionDialog(QDialog):
             QMessageBox.information(self, "Nothing to process", "No new or resumable video jobs were found.")
             return
 
+        try:
+            estimate = estimate_processing_resources(
+                [job["source_video"] for job in jobs],
+                output_root,
+                profile=profile_id,
+                feature_count=int(cfg.get("features", {}).get("estimated_feature_count", 450)),
+                safety_margin_bytes=(
+                    int(self.preferences.values.minimum_free_storage_gib * 1024 ** 3)
+                    if self.preferences.values.minimum_free_storage_gib > 0 else None
+                ),
+                observed_processing_fps=observed_processing_fps(
+                    output_root / ".aihumo" / "performance_history.json",
+                    profile=profile_id,
+                ),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            QMessageBox.critical(self, "Preflight failed", str(exc))
+            return
+        if PreflightDialog(estimate, self).exec() != QDialog.DialogCode.Accepted:
+            return
+        work_by_source = {
+            str(Path(video.path).resolve()).casefold(): video.work_units
+            for video in estimate.videos
+        }
+        frame_weights = [
+            max(1.0, float(work_by_source.get(str(Path(job["source_video"]).resolve()).casefold(), 1.0)))
+            for job in jobs
+        ]
+        peak_by_source = {
+            str(Path(video.path).resolve()).casefold(): estimate_video_peak_bytes(
+                video, profile_id, int(cfg.get("features", {}).get("estimated_feature_count", 450)),
+            )
+            for video in estimate.videos
+        }
+        projected_peak_bytes = [
+            int(peak_by_source.get(str(Path(job["source_video"]).resolve()).casefold(), 0))
+            for job in jobs
+        ]
+        for job in jobs:
+            job["disk_safety_margin_bytes"] = estimate.safety_margin_bytes
+        try:
+            batch_manifest = BatchManifest.create(
+                output_root=output_root,
+                jobs=jobs,
+                profile=profile_id,
+                estimate=estimate,
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Batch manifest error", str(exc))
+            return
+
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
-        self.status.setText(f"Processing {len(jobs)} recording(s) sequentially. Existing compatible jobs may resume.")
+        self.status.setText(
+            f"Processing {len(jobs)} recording(s) sequentially. Compatible landmark work resumes; "
+            "MP4 encoding restarts atomically when needed. Storage is checked before every video."
+        )
         self.thread = QThread(self)
-        self.worker = BatchProcessingWorker(jobs)
+        self.current_progress_bar.setValue(0)
+        self.stage_progress_bar.setValue(0)
+        self.batch_progress_bar.setValue(0)
+        self.progress_metrics.clear()
+        self.worker = BatchProcessingWorker(
+            jobs,
+            frame_weights,
+            manifest_path=batch_manifest.path,
+            projected_peak_bytes=projected_peak_bytes,
+        )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.on_progress)
+        self.worker.stage_progress.connect(self.on_stage_progress)
         self.worker.finished.connect(self.on_finished)
         self.worker.failed.connect(self.on_failed)
         self.worker.cancelled.connect(self.on_cancelled)
+        self.worker.paused.connect(self.on_paused)
         self.worker.finished.connect(self.thread.quit)
         self.worker.failed.connect(self.thread.quit)
         self.worker.cancelled.connect(self.thread.quit)
+        self.worker.paused.connect(self.thread.quit)
         self.thread.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
         self.thread.finished.connect(self._finish_success_after_thread)
         self.thread.start()
 
-    def on_progress(self, fraction: float, message: str) -> None:
-        self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
+    def on_progress(self, overall_fraction: float, current_fraction: float, message: str) -> None:
+        self.current_progress_bar.setValue(int(max(0.0, min(1.0, current_fraction)) * 1000))
+        self.batch_progress_bar.setValue(int(max(0.0, min(1.0, overall_fraction)) * 1000))
         self.status.setText(message)
+
+    def on_stage_progress(self, payload: dict[str, Any]) -> None:
+        progress = payload["progress"]
+        self.stage_progress_bar.setValue(
+            int(max(0.0, min(1.0, progress.stage_fraction)) * 1000)
+        )
+        self.stage_progress_bar.setFormat(
+            f"{progress.stage.replace('_', ' ').title()}: %p%"
+        )
+        eta = format_duration(progress.estimated_remaining_s)
+        elapsed = format_duration(progress.elapsed_s)
+        throughput = (
+            f"{progress.throughput_fps:.1f} processing FPS"
+            if progress.throughput_fps is not None else "calculating throughput"
+        )
+        storage = (
+            format_bytes(progress.available_storage_bytes)
+            if progress.available_storage_bytes is not None else "checking"
+        )
+        self.progress_metrics.setText(
+            f"Video {payload['video_index']}/{payload['video_total']} · {payload['video_name']} · "
+            f"Elapsed {elapsed} · Remaining {eta} · {throughput} · Available storage {storage}"
+        )
 
     def on_finished(self, results: list[Any]) -> None:
         self.results = list(results)
@@ -617,6 +895,11 @@ class BatchSessionDialog(QDialog):
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
         self.status.setText("Batch processing cancelled. Completed jobs remain valid.")
         QMessageBox.information(self, "Batch processing cancelled", message)
+
+    def on_paused(self, message: str) -> None:
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
+        self.status.setText("Batch paused before the next video. Completed work and recovery state were saved.")
+        QMessageBox.warning(self, "Batch paused for storage reserve", message)
 
     def cancel_or_close(self) -> None:
         if self.worker and self.thread and self.thread.isRunning():

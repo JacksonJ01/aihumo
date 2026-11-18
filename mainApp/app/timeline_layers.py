@@ -12,7 +12,8 @@ from aihumo.annotations import PHASES
 
 LAYERS = {
     "activity": "Activity", "exercise": "Exercise", "set": "Sets", "rep": "Repetitions",
-    "phase": "Phases", "form": "Form observations", "quality": "Tracking quality", "other": "Other intervals",
+    "phase": "Phases", "form": "Form observations", "suggestion": "Proposed annotations",
+    "quality": "Tracking quality", "other": "Other intervals",
 }
 ZOOM_STAGES = ("activity", "set", "rep", "phase")
 DEFAULT_THRESHOLDS = (3600, 300, 60, 15)
@@ -23,7 +24,7 @@ SEMANTIC_COLORS = {
     "quality": {"lost": "#d02c4f", "occluded": "#d27d30", "partially_occluded": "#ba9028",
                 "unavailable": "#657684"},
 }
-LAYER_COLORS = ("#239653", "#25808b", "#3676be", "#7956b9", "#663fc2", "#bf3e62", "#cc7131", "#778491")
+LAYER_COLORS = ("#239653", "#25808b", "#3676be", "#7956b9", "#663fc2", "#bf3e62", "#18a9c1", "#cc7131", "#778491")
 
 
 def timeline_preferences(raw=None):
@@ -40,7 +41,7 @@ def timeline_preferences(raw=None):
         opacity = saved.get("opacity")
         semantic = saved.get("semantic")
         layers[key] = {
-            "visible": saved.get("visible", key not in ("form", "quality", "other")) is True,
+            "visible": saved.get("visible", key not in ("form", "suggestion", "quality", "other")) is True,
             "alternate": saved.get("alternate", key in ("set", "rep")) is True,
             "color": _color(saved.get("color"), default_color),
             "alternate_color": _color(saved.get("alternate_color"), "#7197cf"),
@@ -154,10 +155,42 @@ def tracking_intervals(dataframe, times):
     )
 
 
+def suggestion_intervals(rows, times, frames):
+    """Project pending/edited proposals without presenting them as accepted labels."""
+    if not len(times):
+        return ()
+    positive = np.diff(times)
+    positive = positive[np.isfinite(positive) & (positive > 0)]
+    tail = float(np.median(positive)) if len(positive) else 1 / 30
+    lookup = {int(frame): index for index, frame in enumerate(frames) if np.isfinite(frame)}
+    if not lookup:
+        return ()
+    first, last = min(lookup), max(lookup)
+    boundaries = np.r_[times, times[-1] + tail]
+    intervals = []
+    for index, row in enumerate(rows):
+        if row.get("review_status", "pending") not in {"pending", "edited"}:
+            continue
+        try:
+            start_frame, end_frame = int(row["start_frame"]), int(row["end_frame"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        start = lookup.get(max(start_frame, first))
+        end = lookup.get(min(end_frame, last))
+        if start is None or end is None or start > end:
+            continue
+        label = f"{str(row.get('annotation_layer', 'proposal')).replace('_', ' ').title()}: {row.get('suggested_label', '')}"
+        intervals.append(Interval(
+            "suggestion", float(boundaries[start]), float(boundaries[end + 1]), label,
+            str(row.get("suggestion_id", "")), "", index % 2 == 1,
+        ))
+    return tuple(intervals)
+
+
 def visible_layers(settings, duration):
     activity, sets, reps, phases = settings["thresholds"]
     thresholds = dict(activity=activity, exercise=activity, set=sets, rep=reps, phase=phases,
-                      form=phases, quality=phases, other=activity)
+                      form=phases, suggestion=activity, quality=phases, other=activity)
     return tuple(key for key in LAYERS if settings["layers"][key]["visible"]
                  and (not settings["auto"] or duration <= thresholds[key]))
 

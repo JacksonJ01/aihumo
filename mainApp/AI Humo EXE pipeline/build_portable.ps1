@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')]
-    [string]$Version = "0.1.6",
+    [string]$Version = "0.5.0",
     [string]$PythonExe
 )
 
@@ -52,3 +52,4 @@ try {
 $sha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -LiteralPath "$zip.sha256" -Value "$sha256  $(Split-Path -Leaf $zip)" -Encoding ascii
 Write-Host "Created $zip"
+exit 0

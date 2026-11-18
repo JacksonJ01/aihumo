@@ -17,12 +17,12 @@ from aihumo.annotations import AnnotationState
 from aihumo.config import load_config
 from aihumo.features import with_viewer_features
 from aihumo.pose import iter_landmark_rows
-from aihumo.processing import create_skeleton_video, process_video
+from aihumo.processing import SkeletonRenderQueue, create_skeleton_video, process_video
 from aihumo.storage import load_json, save_json_atomic
 from app.AIHuMoDataStudio import HomeWindow
 from app.graph_viewer import InteractiveGraphViewer
 from app.joint_graph import ALL_GRAPHS_MODE, ANGLE_MODE, DISTANCE_MODE, LANDMARK_MODE, MEAN_SOURCE, WORLD_SOURCE, JointGraphWidget
-from app.mode0_batch import BatchSessionDialog
+from app.mode0_batch import BatchProcessingWorker, BatchSessionDialog
 from app.mode0_process import ProcessVideoDialog
 from app.pose_viewer import PoseGraphViewer
 from app.preferences import DesktopPreferences, PreferenceStore, PreferencesDialog
@@ -661,6 +661,7 @@ def test_launcher_graph_opens_matching_annotation_at_current_frame(qt_app, tmp_p
         home._show_graph_viewer(video_path=video, parquet_path=parquet, frame=7)
         viewer = home.graph_window
         assert viewer.back_button.text() == "Back to menu"
+        assert viewer.settings_button.text() == "Settings"
         assert viewer.open_annotations_button.isVisible()
         viewer.play_button.click()
         assert viewer.playback.playing
@@ -670,6 +671,7 @@ def test_launcher_graph_opens_matching_annotation_at_current_frame(qt_app, tmp_p
         assert viewer.review_suspended and not viewer.playback.playing
         assert not viewer.graph._window_prefetch.isActive()
         assert studio.annotation_json_path == annotation
+        assert studio.settings_button.text() == "Settings"
         assert studio.current_frame == 7
         assert [row["annotation_id"] for row in studio.annotations] == ["A00001"]
         assert studio.back_button.text() == "Back to graph viewer"
@@ -1712,7 +1714,7 @@ def test_annotation_reads_rep_signals_only_for_the_selected_interval(qt_app, tmp
         studio.close()
 
 
-def test_launcher_opens_both_mode0_dialogs_maximized_with_title_bar(qt_app, tmp_path):
+def test_launcher_fits_batch_and_maximizes_single_video_with_title_bar(qt_app, tmp_path):
     home = HomeWindow(state_dir=tmp_path / "state")
     opened = []
 
@@ -1731,8 +1733,10 @@ def test_launcher_opens_both_mode0_dialogs_maximized_with_title_bar(qt_app, tmp_
             QTimer.singleShot(0, inspect_dialog)
             button.click()
         assert [kind for kind, _, _, _ in opened] == [BatchSessionDialog, ProcessVideoDialog]
-        for _, maximized, fullscreen, flags in opened:
-            assert maximized and not fullscreen
+        batch, process = opened
+        assert not batch[1] and not batch[2]
+        assert process[1] and not process[2]
+        for _, _, _, flags in opened:
             assert flags & Qt.WindowType.WindowTitleHint
             assert flags & Qt.WindowType.WindowMaximizeButtonHint
             assert not flags & Qt.WindowType.FramelessWindowHint
@@ -2003,6 +2007,7 @@ def test_mode_two_resume_discovers_saved_alignment(qt_app, tmp_path):
                 break
             QTest.qWait(30)
         assert len(window.panes) == 2
+        assert any(button.text() == "Settings" for button in window.findChildren(QPushButton))
         assert home.recent_alignments.items[0]["files"]["alignmentJson"] == str(saved)
     finally:
         home.close()
@@ -2074,6 +2079,78 @@ def test_skeleton_renderer_uses_custom_line_and_joint_colors(tmp_path, detail):
         detail(observed=f"Encoded BGR pixels: line={line.tolist()}, joint={joint.tolist()}")
     finally:
         cap.release()
+
+
+def test_bounded_skeleton_queue_preserves_order_count_and_colors(tmp_path):
+    output = tmp_path / "queued_skeleton.mp4"
+    video_info = {"source_fps": 24.0, "width": 160, "height": 120, "frame_count": 5}
+    renderer = SkeletonRenderQueue(
+        output,
+        video_info,
+        expected_frames=5,
+        max_queue_size=2,
+        skeleton_line_color="#ff00ff",
+        skeleton_joint_color="#00ffff",
+    )
+    renderer.start()
+    for frame_index in range(5):
+        row = {f"lm{joint}_{axis}": np.nan for joint in range(33) for axis in "xy"}
+        row.update(lm11_x=0.25, lm11_y=0.50, lm13_x=0.75, lm13_y=0.50, target_status="tracked")
+        renderer.submit(frame_index, np.zeros((120, 160, 3), dtype=np.uint8), row)
+    assert renderer.finish() == 5
+    assert renderer.queue.maxsize == 2
+
+    capture = cv2.VideoCapture(str(output))
+    decoded = 0
+    last_frame = None
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            decoded += 1
+            last_frame = frame
+    finally:
+        capture.release()
+    assert decoded == 5
+    assert last_frame is not None
+    line, joint = last_frame[60, 80], last_frame[60, 40]
+    assert line[0] > 120 and line[1] < 80 and line[2] > 120
+    assert joint[0] > 120 and joint[1] > 120 and joint[2] < 80
+
+
+def test_fresh_processing_job_streams_skeleton_during_pose_inference(tmp_path, monkeypatch):
+    source = tmp_path / "clip.mp4"
+    write_video(source, 6)
+    model = tmp_path / "model.task"
+    model.write_bytes(b"stub model")
+    no_pose = SimpleNamespace(pose_landmarks=[], pose_world_landmarks=[])
+    detector = SimpleNamespace(detect_for_video=lambda image, timestamp: no_pose)
+    monkeypatch.setattr("aihumo.pose._make_landmarker", lambda *args: nullcontext(detector))
+    config = load_config(Path(__file__).resolve().parents[1] / "configs" / "config.json")
+    config["graphs"]["enabled"] = False
+    messages = []
+    result = process_video(
+        source_video=source,
+        model_path=model,
+        cfg=config,
+        identifiers={
+            "session_id": "S001", "video_id": "V001",
+            "participant_id": "P001", "camera_id": "C001",
+        },
+        optional_metadata={},
+        output_root=tmp_path / "out",
+        progress_callback=lambda _, message: messages.append(message),
+    )
+    assert result.processed_video_path.is_file()
+    assert any("Queued skeleton video complete" in message for message in messages)
+    assert not any("resume-safe pass" in message for message in messages)
+    capture = cv2.VideoCapture(str(result.processed_video_path))
+    try:
+        assert int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) == 6
+    finally:
+        capture.release()
+    assert len(pd.read_parquet(result.features_path)) == 6
 
 
 def test_resume_timing_identity_and_completed_video_validation(tmp_path, monkeypatch, detail):
@@ -2219,5 +2296,42 @@ def test_corrupt_batch_checkpoint_is_reported_and_row_edits_survive(qt_app, tmp_
         assert checkpoint.read_text(encoding="utf-8") == "{"
         detail(observed=f"{recording.session_id}/{recording.video_id}, "
                f"{recording.camera_id}, {recording.camera_angle}; checkpoint error shown; no worker started")
+    finally:
+        dialog.close()
+
+
+def test_batch_progress_reports_current_and_frame_weighted_overall_eta(qt_app, monkeypatch):
+    jobs = [
+        {"identifiers": {"session_id": "S001", "video_id": "short"}},
+        {"identifiers": {"session_id": "S002", "video_id": "long"}},
+    ]
+
+    def fake_process_video(**job):
+        job["progress_callback"](0.5, "Pose/tracking test update")
+        return job["identifiers"]["video_id"]
+
+    monkeypatch.setattr("app.mode0_batch.process_video", fake_process_video)
+    worker = BatchProcessingWorker(jobs, frame_weights=[100, 300])
+    updates = []
+    results = []
+    worker.progress.connect(lambda overall, current, message: updates.append((overall, current, message)))
+    worker.finished.connect(results.extend)
+    worker.run()
+
+    first_half = next(update for update in updates if "Video 1/2" in update[2] and update[1] == 0.5)
+    second_half = next(update for update in updates if "Video 2/2" in update[2] and update[1] == 0.5)
+    assert first_half[0] == pytest.approx(0.125)
+    assert second_half[0] == pytest.approx(0.625)
+    assert "Current 50.0%" in second_half[2]
+    assert "Batch 62.5%" in second_half[2]
+    assert "ETA" in second_half[2]
+    assert results == ["short", "long"]
+
+    dialog = BatchSessionDialog()
+    try:
+        dialog.on_progress(0.625, 0.5, second_half[2])
+        assert dialog.current_progress_bar.value() == 500
+        assert dialog.batch_progress_bar.value() == 625
+        assert "Video 2/2" in dialog.status.text()
     finally:
         dialog.close()

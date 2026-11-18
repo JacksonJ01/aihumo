@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.1.6}"
+version="${1:-0.5.0}"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Version must use MAJOR.MINOR.PATCH." >&2
   exit 2
@@ -25,9 +25,10 @@ work_dir="$script_dir/build/v${version}-${architecture}"
 dist_dir="$script_dir/dist/v${version}-${architecture}"
 release_dir="$script_dir/release"
 archive="$release_dir/AIHuMo-Data-Studio-macOS-${label}-v${version}.zip"
+dmg="$release_dir/AIHuMo-Data-Studio-macOS-${label}-v${version}.dmg"
 app_bundle="$dist_dir/AIHuMo Data Studio.app"
 
-if [[ -e "$app_bundle" || -e "$archive" ]]; then
+if [[ -e "$app_bundle" || -e "$archive" || -e "$dmg" ]]; then
   echo "Build output already exists for v${version} ${architecture}." >&2
   exit 2
 fi
@@ -58,4 +59,7 @@ cp "$script_dir/README.md" "$stage_dir/README.md"
 (cd "$stage_dir" && ditto -c -k --sequesterRsrc . "$archive")
 checksum="$(shasum -a 256 "$archive" | awk '{print $1}')"
 printf '%s  %s\n' "$checksum" "$(basename "$archive")" > "$archive.sha256"
-echo "Created $archive"
+hdiutil create -volname "AIHuMo Data Studio" -srcfolder "$stage_dir" -ov -format UDZO "$dmg"
+dmg_checksum="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+printf '%s  %s\n' "$dmg_checksum" "$(basename "$dmg")" > "$dmg.sha256"
+echo "Created $archive and $dmg"

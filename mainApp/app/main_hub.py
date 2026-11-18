@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QVariantAnimation, pyqtSignal
+from PyQt6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, pyqtSignal
 from PyQt6.QtGui import (
     QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPixmap, QPolygonF,
     QTextOption, QTransform,
@@ -19,10 +19,19 @@ from PyQt6.QtWidgets import (
 
 from aihumo.storage import load_json, save_json_atomic
 from .cognitive_games import CognitiveGameDialog
+from .app_guides import guide_for
+from .how_to_dialog import HowToDialog
 from .movement_games import MovementGameDialog, load_game_definitions
-from .preferences import PreferenceStore, PreferencesDialog
+from .preferences import DesktopPreferences, HUB_BACKGROUND_DIR, PreferenceStore, PreferencesDialog
+from .app_paths import user_data_dir
 
 HUB_CARD_DIR = Path(__file__).resolve().parents[1] / "assets" / "hub_cards_v2"
+HUB_PROFESSIONAL_CARD_DIR = Path(__file__).resolve().parents[1] / "assets" / "hub_cards_professional"
+
+
+def hub_card_directory(style: str) -> Path:
+    """Resolve the persisted Hub artwork style without mutating global state."""
+    return HUB_PROFESSIONAL_CARD_DIR if style == "Professional" else HUB_CARD_DIR
 
 
 @dataclass(frozen=True)
@@ -70,30 +79,6 @@ PIPELINE_APPS = (
         "Movement Analysis", art="pipeline.jpg",
         keywords=("processing", "video", "features", "mediapipe", "skeleton", "workflow", "parquet", "dataset"),
     ),
-    HubApp(
-        "annotation", "Annotation Studio", "Mode 1 · Layered annotation",
-        "Label activities, sets, repetitions, phases, form observations, notes, and synchronized frame context.",
-        "Movement Analysis", art="annotation.jpg",
-        keywords=("labeling", "timeline", "segments", "activity", "sets", "repetitions", "phases", "form"), mode=1,
-    ),
-    HubApp(
-        "alignment", "Session Alignment", "Mode 2 · Multi-camera alignment",
-        "Align related recordings and annotations across cameras, trimmed clips, and session timelines.",
-        "Movement Analysis", art="alignment.jpg",
-        keywords=("synchronize", "cameras", "sessions", "offset", "trim", "timeline", "matching", "recordings"), mode=2,
-    ),
-    HubApp(
-        "graph_2d", "Interactive Graph Viewer (2D)", "Mode 3 · Image-plane measurements",
-        "Review synchronized skeleton video, 2D joint angles, landmark motion, distances, and annotation overlays.",
-        "Movement Analysis", art="graph_2d.jpg",
-        keywords=("angles", "landmarks", "image-plane", "charts", "timeline", "velocity", "measurements", "visualization"), mode=3,
-    ),
-    HubApp(
-        "graph_3d", "Interactive Graph Viewer (3D)", "Mode 4 · Estimated world measurements",
-        "Inspect the rotatable pose and synchronized estimated-world timelines alongside the source video.",
-        "Movement Analysis", art="graph_3d.jpg",
-        keywords=("world", "spatial", "rotation", "coordinates", "angles", "trajectory", "charts", "visualization"), mode=4,
-    ),
 )
 
 
@@ -116,9 +101,11 @@ COGNITIVE_APPS = (
 
 
 GAME_SECTIONS = {
-    "path": "Training",
-    "freeze": "Training",
+    "just_dance": "Games",
+    "flow_zone": "Games",
+    "mirror_match": "Games",
     "balance": "Training",
+    "path_precision": "Training",
     "sports": "Training",
     "rehab": "Rehabilitation",
     "ergonomics": "Rehabilitation",
@@ -129,22 +116,24 @@ GAME_SECTIONS = {
 
 GAME_SEARCH_TERMS = {
     "just_dance": ("dance", "music", "choreography", "beat", "tempo", "rhythm", "timing", "coordination"),
-    "target_grid_6": ("zones", "grid", "targets", "stepping", "reaction", "position", "accuracy", "coordination"),
-    "target_grid_12": ("precision", "zones", "dense", "grid", "target", "accuracy", "footwork", "reaction"),
-    "mirror": ("pose", "symmetry", "imitation", "copy", "bilateral", "form", "alignment", "control"),
-    "path": ("trajectory", "tracing", "route", "smoothness", "hand", "foot", "precision", "coordination"),
-    "reaction": ("reflexes", "speed", "targets", "response", "quickness", "reach", "timing", "coordination"),
-    "freeze": ("pose", "stillness", "hold", "stability", "balance", "posture", "control", "endurance"),
-    "avoid": ("escape", "zones", "avoidance", "safety", "agility", "position", "movement", "reaction"),
-    "rhythm": ("beat", "tempo", "timing", "cadence", "music", "movement", "consistency", "coordination"),
-    "obstacle": ("dodge", "evade", "hazards", "agility", "sidestep", "squat", "reaction", "clearance"),
+    "flow_zone": ("zones", "grid", "targets", "reaction", "avoidance", "dodge", "agility", "precision"),
+    "mirror_match": ("pose", "symmetry", "imitation", "freeze", "partner", "social", "alignment", "control"),
+    "path_precision": ("trajectory", "tracing", "route", "smoothness", "reach", "precision", "accuracy", "coordination"),
     "sequence": ("memory", "order", "colors", "numbers", "recall", "pattern", "cognitive", "zones"),
     "balance": ("stability", "sway", "center", "posture", "control", "equilibrium", "reach", "coordination"),
-    "partner": ("synchronize", "duo", "matching", "teamwork", "social", "timing", "coordination", "imitation"),
     "sports": ("athletics", "reflexes", "reach", "stance", "boxing", "tennis", "goalkeeper", "reaction"),
     "rehab": ("rehabilitation", "therapy", "range", "mobility", "controlled", "recovery", "assessment", "movement"),
     "ergonomics": ("posture", "lifting", "desk", "workplace", "reaching", "bending", "risk", "assessment"),
     "gait": ("walking", "stride", "steps", "symmetry", "cadence", "locomotion", "turning", "balance"),
+}
+
+
+# Consolidated apps use dedicated artwork that communicates every merged
+# challenge family rather than inheriting one retired mode's thumbnail.
+GAME_ART = {
+    "flow_zone": "flow_zone.jpg",
+    "mirror_match": "mirror_match.jpg",
+    "path_precision": "path_precision.jpg",
 }
 
 
@@ -158,7 +147,7 @@ def hub_apps() -> tuple[HubApp, ...]:
             definition.category,
             f"{definition.description} Objective: {definition.objective}",
             section,
-            art=f"{definition.id}.jpg",
+            art=GAME_ART.get(definition.id, f"{definition.id}.jpg"),
             keywords=GAME_SEARCH_TERMS[definition.id],
             game_id=definition.id,
         ))
@@ -209,13 +198,26 @@ class ThumbnailPlaceholder(QLabel):
     def __init__(self, art: str = "", parent=None):
         super().__init__(parent)
         self.setObjectName("thumbnailPlaceholder")
-        self.image_path = HUB_CARD_DIR / art if art else None
+        self.art = art
+        self.artwork_style = "Focus Mode"
+        self.image_path = hub_card_directory(self.artwork_style) / art if art else None
         self.source = QPixmap(str(self.image_path)) if self.image_path else QPixmap()
         self.setAccessibleName("App artwork" if not self.source.isNull() else "Thumbnail placeholder")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(176, 104)
         self.setMaximumHeight(126)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._update_pixmap()
+
+    def set_artwork_style(self, style: str) -> None:
+        style = "Professional" if style == "Professional" else "Focus Mode"
+        if style == self.artwork_style:
+            return
+        self.artwork_style = style
+        self.image_path = hub_card_directory(style) / self.art if self.art else None
+        self.source = QPixmap(str(self.image_path)) if self.image_path else QPixmap()
+        self.setAccessibleName("App artwork" if not self.source.isNull() else "Thumbnail placeholder")
+        self.clear()
         self._update_pixmap()
 
     def resizeEvent(self, event):
@@ -238,6 +240,10 @@ class PerspectiveAppCarousel(QWidget):
     """Smooth, image-first 2.5D carousel for the complete app catalogue."""
 
     currentIndexChanged = pyqtSignal(int)
+    EDGE_DWELL_MS = 3000
+    EDGE_INITIAL_INTERVAL_MS = 1000
+    EDGE_FAST_INTERVAL_MS = 500
+    EDGE_ACCELERATE_AFTER_STEPS = 3
 
     def __init__(self, apps: tuple[HubApp, ...], launch: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
@@ -250,24 +256,36 @@ class PerspectiveAppCarousel(QWidget):
         self._press_position = 0.0
         self._dragged = False
         self._hover_x: float | None = None
+        self._edge_direction = 0
+        self._edge_active = False
+        self._edge_step_count = 0
         self._last_emitted_index = 0
         self._sources = {
             app.id: QPixmap(str(HUB_CARD_DIR / app.art)) if app.art else QPixmap()
             for app in self.apps
         }
+        self._artwork_style = "Focus Mode"
         self._card_cache: dict[tuple[str, bool, bool], QPixmap] = {}
         self._animation = QVariantAnimation(self)
         self._animation.setDuration(420)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._animation.valueChanged.connect(self._animation_value_changed)
         self._animation.finished.connect(self._normalize_position)
+        self._edge_delay_timer = QTimer(self)
+        self._edge_delay_timer.setSingleShot(True)
+        self._edge_delay_timer.setInterval(self.EDGE_DWELL_MS)
+        self._edge_delay_timer.timeout.connect(self._begin_edge_scroll)
+        self._edge_step_timer = QTimer(self)
+        self._edge_step_timer.setInterval(self.EDGE_INITIAL_INTERVAL_MS)
+        self._edge_step_timer.timeout.connect(self._edge_advance)
         self.setMinimumHeight(330)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self.setAccessibleName("All Apps perspective carousel")
         self.setToolTip(
-            "Drag, use the mouse wheel, or press Left and Right. "
+            "Drag, use the mouse wheel, press Left and Right, or hold the pointer "
+            "at either edge for three seconds to auto-browse. "
             "Select the centered card again to open it."
         )
 
@@ -285,12 +303,27 @@ class PerspectiveAppCarousel(QWidget):
         self._dark = bool(dark)
         self.update()
 
+    def set_artwork_style(self, style: str) -> None:
+        style = "Professional" if style == "Professional" else "Focus Mode"
+        if style == self._artwork_style:
+            return
+        self._artwork_style = style
+        directory = hub_card_directory(style)
+        self._sources = {
+            app.id: QPixmap(str(directory / app.art)) if app.art else QPixmap()
+            for app in self.apps
+        }
+        self._card_cache.clear()
+        self.update()
+
     def set_apps(self, apps: tuple[HubApp, ...]) -> None:
+        self._stop_edge_hover()
         current_id = self.current_app.id if self.current_app else None
         self.apps = tuple(apps)
+        directory = hub_card_directory(self._artwork_style)
         for app in self.apps:
             self._sources.setdefault(
-                app.id, QPixmap(str(HUB_CARD_DIR / app.art)) if app.art else QPixmap()
+                app.id, QPixmap(str(directory / app.art)) if app.art else QPixmap()
             )
         index = next((i for i, app in enumerate(self.apps) if app.id == current_id), 0)
         self._last_emitted_index = -2
@@ -346,6 +379,56 @@ class PerspectiveAppCarousel(QWidget):
             self._last_emitted_index = index
             self.currentIndexChanged.emit(index)
         self.update()
+
+    def _edge_zone(self, x: float) -> int:
+        if len(self.apps) <= 1 or self.width() <= 0:
+            return 0
+        edge_width = min(160.0, max(84.0, self.width() * 0.14))
+        if x <= edge_width:
+            return -1
+        if x >= self.width() - edge_width:
+            return 1
+        return 0
+
+    def _update_edge_hover(self, x: float) -> None:
+        direction = self._edge_zone(x)
+        if direction == self._edge_direction:
+            return
+        self._stop_edge_hover()
+        self._edge_direction = direction
+        if direction and self._press_point is None:
+            self._edge_delay_timer.start(self.EDGE_DWELL_MS)
+        self.update()
+
+    def _stop_edge_hover(self) -> None:
+        self._edge_delay_timer.stop()
+        self._edge_step_timer.stop()
+        self._edge_direction = 0
+        self._edge_active = False
+        self._edge_step_count = 0
+        self.update()
+
+    def _begin_edge_scroll(self) -> None:
+        if not self._edge_direction or self._press_point is not None or len(self.apps) <= 1:
+            return
+        self._edge_active = True
+        self._edge_step_count = 0
+        self._edge_step_timer.setInterval(self.EDGE_INITIAL_INTERVAL_MS)
+        self._edge_advance()
+        self._edge_step_timer.start()
+        self.update()
+
+    def _edge_advance(self) -> None:
+        if not self._edge_direction or len(self.apps) <= 1:
+            self._stop_edge_hover()
+            return
+        if self._edge_direction < 0:
+            self.previous()
+        else:
+            self.next()
+        self._edge_step_count += 1
+        if self._edge_step_count >= self.EDGE_ACCELERATE_AFTER_STEPS:
+            self._edge_step_timer.setInterval(self.EDGE_FAST_INTERVAL_MS)
 
     def _metrics(self) -> tuple[float, float, float, float]:
         card_width = min(470.0, max(310.0, self.width() * 0.39))
@@ -462,10 +545,27 @@ class PerspectiveAppCarousel(QWidget):
                 painter.drawPixmap(0, 0, card)
                 painter.restore()
             self._hit_polygons.append((index, quad))
+        if self._edge_direction:
+            cue_width = min(145.0, self.width() * 0.18)
+            cue_rect = QRectF(
+                10.0 if self._edge_direction < 0 else self.width() - cue_width - 10.0,
+                max(12.0, center_y - 27.0), cue_width, 54.0,
+            )
+            painter.setPen(QColor("#4de1e8"))
+            painter.setBrush(QColor(8, 23, 45, 205 if self._dark else 175))
+            painter.drawRoundedRect(cue_rect, 16.0, 16.0)
+            painter.setPen(QColor("#ffffff"))
+            cue = "◀  Auto browsing" if self._edge_active and self._edge_direction < 0 else (
+                "Auto browsing  ▶" if self._edge_active else (
+                    "◀  Hold to browse" if self._edge_direction < 0 else "Hold to browse  ▶"
+                )
+            )
+            painter.drawText(cue_rect, Qt.AlignmentFlag.AlignCenter, cue)
         painter.end()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            self._stop_edge_hover()
             self.setFocus()
             self._animation.stop()
             self._press_point = event.position()
@@ -477,6 +577,7 @@ class PerspectiveAppCarousel(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         if self._press_point is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self._stop_edge_hover()
             delta = event.position().x() - self._press_point.x()
             if abs(delta) >= 4:
                 self._dragged = True
@@ -486,6 +587,7 @@ class PerspectiveAppCarousel(QWidget):
             return
         if event.buttons() == Qt.MouseButton.NoButton:
             x = event.position().x()
+            self._update_edge_hover(x)
             if self._hover_x is None:
                 self._hover_x = x
             else:
@@ -516,11 +618,13 @@ class PerspectiveAppCarousel(QWidget):
                         self.set_current_index(selected)
             self._press_point = None
             self._hover_x = point.x()
+            self._update_edge_hover(point.x())
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:
+        self._stop_edge_hover()
         horizontal = event.angleDelta().x()
         vertical = event.angleDelta().y()
         if horizontal and abs(horizontal) >= abs(vertical):
@@ -536,19 +640,25 @@ class PerspectiveAppCarousel(QWidget):
 
     def enterEvent(self, event) -> None:
         self._hover_x = None
+        position = getattr(event, "position", None)
+        if callable(position):
+            self._update_edge_hover(position().x())
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         self._hover_x = None
+        self._stop_edge_hover()
         if self._press_point is None and self.apps:
             self.set_current_index(self.current_index)
         super().leaveEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Left:
+            self._stop_edge_hover()
             self.previous()
             event.accept()
         elif event.key() == Qt.Key.Key_Right:
+            self._stop_edge_hover()
             self.next()
             event.accept()
         elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
@@ -559,7 +669,8 @@ class PerspectiveAppCarousel(QWidget):
 
 
 class RecentAppCard(QFrame):
-    def __init__(self, app: HubApp | None, launch: Callable[[HubApp], None], parent=None):
+    def __init__(self, app: HubApp | None, launch: Callable[[HubApp], None],
+                 how_to: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
         self.app = app
         self.setObjectName("recentAppCard")
@@ -580,10 +691,16 @@ class RecentAppCard(QFrame):
         if app is not None:
             button.clicked.connect(lambda: launch(app))
         layout.addWidget(button)
+        guide = QPushButton("How to use", objectName="quietButton")
+        guide.setEnabled(app is not None)
+        if app is not None:
+            guide.clicked.connect(lambda: how_to(app))
+        layout.addWidget(guide)
 
 
 class AppDetailCard(QFrame):
-    def __init__(self, app: HubApp, launch: Callable[[HubApp], None], parent=None):
+    def __init__(self, app: HubApp, launch: Callable[[HubApp], None],
+                 how_to: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
         self.app = app
         self.filter_match = True
@@ -608,10 +725,16 @@ class AppDetailCard(QFrame):
         description.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout.addWidget(description)
         layout.addStretch(1)
+        actions = QHBoxLayout()
+        self.guide_button = QPushButton("How to use", objectName="quietButton")
+        self.guide_button.setToolTip(f"Read the purpose and instructions for {app.title}")
+        self.guide_button.clicked.connect(lambda: how_to(app))
+        actions.addWidget(self.guide_button)
         self.open_button = QPushButton(f"{app.title}  →", objectName="primaryButton")
         self.open_button.setToolTip(f"Open {app.title}")
         self.open_button.clicked.connect(lambda: launch(app))
-        layout.addWidget(self.open_button)
+        actions.addWidget(self.open_button, 1)
+        layout.addLayout(actions)
 
     def matches(self, query: str) -> bool:
         return hub_app_search_rank(self.app, query) is not None
@@ -620,9 +743,10 @@ class AppDetailCard(QFrame):
 class AppDetailGrid(QWidget):
     """Responsive card grid that remains populated while its stacked page is hidden."""
 
-    def __init__(self, apps: tuple[HubApp, ...], launch: Callable[[HubApp], None], parent=None):
+    def __init__(self, apps: tuple[HubApp, ...], launch: Callable[[HubApp], None],
+                 how_to: Callable[[HubApp], None], parent=None):
         super().__init__(parent)
-        self.cards = [AppDetailCard(app, launch) for app in apps]
+        self.cards = [AppDetailCard(app, launch, how_to) for app in apps]
         self._display_cards = list(self.cards)
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 8, 0, 8)
@@ -671,10 +795,10 @@ class AppDetailGrid(QWidget):
 
 class CategorySection(QFrame):
     def __init__(self, title: str, description: str, apps: tuple[HubApp, ...],
-                 launch: Callable[[HubApp], None], *, expanded: bool,
-                 collapsible: bool = True, parent=None):
+                 launch: Callable[[HubApp], None], how_to: Callable[[HubApp], None], *, expanded: bool,
+                 collapsible: bool = True, framed: bool = True, parent=None):
         super().__init__(parent)
-        self.setObjectName("categorySection")
+        self.setObjectName("categorySection" if framed else "focusedCategorySection")
         self.title = title
         self.description = description
         self.collapsible = collapsible
@@ -694,7 +818,7 @@ class CategorySection(QFrame):
         self.description_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.description_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         content_layout.addWidget(self.description_label)
-        self.grid = AppDetailGrid(apps, launch)
+        self.grid = AppDetailGrid(apps, launch, how_to)
         content_layout.addWidget(self.grid)
         outer.addWidget(self.content)
         self.set_expanded(expanded)
@@ -718,6 +842,166 @@ class CategorySection(QFrame):
         return count
 
 
+class HubBackgroundViewport(QWidget):
+    """Faded, crop-aware background that moves more slowly than Hub content."""
+
+    def __init__(self, values: DesktopPreferences, parent=None):
+        super().__init__(parent)
+        self.values = values
+        self.dark = False
+        self.scroll_value = 0
+        self.scroll_maximum = 0
+        self.source = QPixmap()
+        self._blurred_key: tuple[str, int] | None = None
+        self._blurred = QPixmap()
+        self.setAutoFillBackground(False)
+        self.apply_preferences(values, False)
+
+    def apply_preferences(self, values: DesktopPreferences, dark: bool) -> None:
+        self.values = values
+        self.dark = dark
+        custom = Path(values.hub_custom_background)
+        path = custom if values.hub_background_mode == "Custom" and custom.is_file() else (
+            HUB_BACKGROUND_DIR / ("dark.png" if dark else "light.png")
+        )
+        self.source = QPixmap(str(path))
+        self._blurred_key = None
+        self._blurred = QPixmap()
+        self.update()
+
+    def set_scroll_state(self, value: int, maximum: int) -> None:
+        self.scroll_value = value
+        self.scroll_maximum = maximum
+        self.update()
+
+    def _display_source(self) -> QPixmap:
+        if self.source.isNull() or not self.values.hub_background_blur or self.values.hub_background_blur_strength <= 0:
+            return self.source
+        path_key = str(self.values.hub_custom_background) if self.values.hub_background_mode == "Custom" else ("dark" if self.dark else "light")
+        key = (path_key, self.values.hub_background_blur_strength)
+        if self._blurred_key == key and not self._blurred.isNull():
+            return self._blurred
+        factor = max(2, 1 + self.values.hub_background_blur_strength // 2)
+        small = self.source.scaled(
+            max(1, self.source.width() // factor), max(1, self.source.height() // factor),
+            Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation,
+        )
+        self._blurred = small.scaled(
+            self.source.size(), Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._blurred_key = key
+        return self._blurred
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.fillRect(self.rect(), QColor("#091426" if self.dark else "#f5f7fb"))
+        source = self._display_source()
+        if source.isNull() or self.values.hub_background_opacity <= 0:
+            painter.end()
+            return
+        parallax = self.values.hub_parallax_strength
+        overscan = 1.12 + 0.36 * parallax
+        target_width = max(1, round(self.width() * overscan))
+        target_height = max(1, round(self.height() * overscan))
+        scaled = source.scaled(
+            target_width, target_height, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        max_x = max(0, scaled.width() - self.width())
+        max_y = max(0, scaled.height() - self.height())
+        ratio = self.scroll_value / self.scroll_maximum if self.scroll_maximum else 0.0
+        crop_x = max_x * self.values.hub_background_crop_x
+        crop_y = max_y * self.values.hub_background_crop_y
+        crop_y += (ratio - 0.5) * parallax * max_y
+        crop_y = max(0.0, min(float(max_y), crop_y))
+        painter.setOpacity(self.values.hub_background_opacity)
+        painter.drawPixmap(
+            QRectF(self.rect()), scaled,
+            QRectF(crop_x, crop_y, self.width(), self.height()),
+        )
+        painter.end()
+
+
+class HubBackgroundBody(HubBackgroundViewport):
+    """Paint the parallax layer inside the scrolling page, behind its controls."""
+
+    def __init__(self, values: DesktopPreferences, parent=None):
+        super().__init__(values, parent)
+        self.viewport_height = 1
+
+    def set_viewport_height(self, height: int) -> None:
+        self.viewport_height = max(1, height)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.fillRect(event.rect(), QColor("#091426" if self.dark else "#f5f7fb"))
+        source = self._display_source()
+        if source.isNull() or self.values.hub_background_opacity <= 0:
+            painter.end()
+            return
+
+        height = min(self.viewport_height, self.height())
+        target = QRectF(0, self.scroll_value, self.width(), height)
+        parallax = self.values.hub_parallax_strength
+        overscan = 1.12 + 0.36 * parallax
+        scaled = source.scaled(
+            max(1, round(target.width() * overscan)),
+            max(1, round(target.height() * overscan)),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        max_x = max(0, scaled.width() - round(target.width()))
+        max_y = max(0, scaled.height() - round(target.height()))
+        ratio = self.scroll_value / self.scroll_maximum if self.scroll_maximum else 0.0
+        crop_x = max_x * self.values.hub_background_crop_x
+        crop_y = max_y * self.values.hub_background_crop_y
+        crop_y += (ratio - 0.5) * parallax * max_y
+        crop_y = max(0.0, min(float(max_y), crop_y))
+        painter.setOpacity(self.values.hub_background_opacity)
+        painter.drawPixmap(
+            target,
+            scaled,
+            QRectF(crop_x, crop_y, target.width(), target.height()),
+        )
+        painter.end()
+
+
+class HubParallaxScrollArea(QScrollArea):
+    def __init__(self, values: DesktopPreferences, parent=None):
+        super().__init__(parent)
+        self.values = values
+        self.dark = False
+        self.background_body: HubBackgroundBody | None = None
+        self.verticalScrollBar().valueChanged.connect(self._sync_background)
+        self.verticalScrollBar().rangeChanged.connect(lambda *_: self._sync_background())
+
+    def set_background_body(self, body: HubBackgroundBody) -> None:
+        self.background_body = body
+        body.apply_preferences(self.values, self.dark)
+        self._sync_background()
+
+    def apply_preferences(self, values: DesktopPreferences, dark: bool) -> None:
+        self.values = values
+        self.dark = dark
+        if self.background_body is not None:
+            self.background_body.apply_preferences(values, dark)
+        self._sync_background()
+
+    def _sync_background(self, *_args) -> None:
+        bar = self.verticalScrollBar()
+        if self.background_body is not None:
+            self.background_body.set_scroll_state(bar.value(), bar.maximum())
+            self.background_body.set_viewport_height(self.viewport().height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._sync_background()
+
+
 class MainHubDialog(QDialog):
     """Project entry point with recent apps and a categorized app catalogue."""
 
@@ -732,7 +1016,7 @@ class MainHubDialog(QDialog):
         self._open_pipeline_callback = open_pipeline
         self._open_pipeline_mode_callback = open_pipeline_mode
         self._resume_mode_callback = resume_mode
-        self.state_dir = state_dir or Path(__file__).resolve().parents[1] / ".aihumo"
+        self.state_dir = state_dir or user_data_dir()
         self.preferences = preferences or PreferenceStore(self.state_dir / "settings.json")
         self.apps = hub_apps()
         self.app_by_id = {app.id: app for app in self.apps}
@@ -741,6 +1025,7 @@ class MainHubDialog(QDialog):
         self.category_grids: dict[str, AppDetailGrid] = {}
         self.home_sections: dict[str, CategorySection] = {}
         self.filterables: list[CategorySection] = []
+        self.parallax_scrolls: list[HubParallaxScrollArea] = []
         self.setWindowTitle("AIHuMo Main Hub")
         self.resize(1380, 850)
 
@@ -780,10 +1065,16 @@ class MainHubDialog(QDialog):
         self.search.setMaximumWidth(220)
         self.search.textChanged.connect(self._filter_apps)
         layout.addWidget(self.search)
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems(("Light", "Dark"))
-        self.theme_combo.currentTextChanged.connect(self._visual_option_changed)
-        layout.addWidget(self.theme_combo)
+        self.theme_button = QPushButton(objectName="themeToggle")
+        self.theme_button.setCheckable(True)
+        self.theme_button.setToolTip("Switch between light and dark mode")
+        self.theme_button.clicked.connect(self._toggle_theme)
+        layout.addWidget(self.theme_button)
+        self.artwork_button = QPushButton(objectName="artworkToggle")
+        self.artwork_button.setCheckable(True)
+        self.artwork_button.setToolTip("Switch between Focus Mode and Professional Hub artwork")
+        self.artwork_button.clicked.connect(self._toggle_artwork_style)
+        layout.addWidget(self.artwork_button)
         settings = QPushButton("Settings", objectName="quietButton")
         settings.clicked.connect(self._open_settings)
         layout.addWidget(settings)
@@ -793,15 +1084,18 @@ class MainHubDialog(QDialog):
         return bar
 
     def _scroll_page(self) -> tuple[QScrollArea, QWidget, QVBoxLayout]:
-        scroll = QScrollArea()
+        scroll = HubParallaxScrollArea(self.preferences.values)
+        self.parallax_scrolls.append(scroll)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QWidget(objectName="hubBody")
+        body = HubBackgroundBody(self.preferences.values)
+        body.setObjectName("hubBody")
         layout = QVBoxLayout(body)
         layout.setContentsMargins(30, 26, 30, 24)
         layout.setSpacing(18)
         scroll.setWidget(body)
+        scroll.set_background_body(body)
         return scroll, body, layout
 
     def _home_page(self) -> QWidget:
@@ -837,11 +1131,14 @@ class MainHubDialog(QDialog):
         self.carousel_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.carousel_open = QPushButton("Open selected app", objectName="primaryButton")
         self.carousel_open.clicked.connect(self.all_apps_carousel.activate_current)
+        self.carousel_guide = QPushButton("How to use selected", objectName="quietButton")
+        self.carousel_guide.clicked.connect(self._show_current_carousel_guide)
         self.carousel_next = QPushButton("Next →", objectName="quietButton")
         self.carousel_next.clicked.connect(self.all_apps_carousel.next)
         carousel_controls.addWidget(self.carousel_previous)
         carousel_controls.addStretch(1)
         carousel_controls.addWidget(self.carousel_status)
+        carousel_controls.addWidget(self.carousel_guide)
         carousel_controls.addWidget(self.carousel_open)
         carousel_controls.addStretch(1)
         carousel_controls.addWidget(self.carousel_next)
@@ -851,6 +1148,7 @@ class MainHubDialog(QDialog):
         for section in self.NAV_ITEMS[1:]:
             apps = tuple(app for app in self.apps if app.section == section)
             category = CategorySection(section, CATEGORY_DESCRIPTIONS[section], apps, self._launch_app,
+                                       self._show_guide,
                                        expanded=False, collapsible=True)
             self.home_sections[section] = category
             self.filterables.append(category)
@@ -873,11 +1171,13 @@ class MainHubDialog(QDialog):
         layout.addWidget(heading)
         apps = tuple(app for app in self.apps if app.section == section)
         category = CategorySection(section, CATEGORY_DESCRIPTIONS[section], apps, self._launch_app,
-                                   expanded=True, collapsible=False)
+                                   self._show_guide,
+                                   expanded=True, collapsible=False, framed=False)
         self.category_descriptions[section] = category.description_label
         self.category_grids[section] = category.grid
         self.filterables.append(category)
         layout.addWidget(category)
+        layout.addWidget(self._getting_started(section))
         layout.addStretch(1)
         layout.addWidget(self._footer())
         return scroll
@@ -923,7 +1223,7 @@ class MainHubDialog(QDialog):
         slots: list[HubApp | None] = [*recent, *([None] * (3 - len(recent)))]
         self.recent_cards: list[RecentAppCard] = []
         for index, app in enumerate(slots[:3]):
-            card = RecentAppCard(app, self._launch_app)
+            card = RecentAppCard(app, self._launch_app, self._show_guide)
             self.recent_cards.append(card)
             self.recent_cards_layout.addWidget(card, 0, index)
             self.recent_cards_layout.setColumnStretch(index, 1)
@@ -931,15 +1231,70 @@ class MainHubDialog(QDialog):
     def _launch_app(self, app: HubApp) -> None:
         self._remember_app(app)
         if app.cognitive_game_id:
-            CognitiveGameDialog(app.cognitive_game_id, self).exec()
+            self._exec_subapp_dialog(CognitiveGameDialog(
+                app.cognitive_game_id, self, preferences=self.preferences
+            ))
             return
         if app.game_id:
-            MovementGameDialog(app.game_id, self).exec()
+            self._exec_subapp_dialog(MovementGameDialog(
+                app.game_id, self, preferences=self.preferences
+            ))
             return
         if app.mode is not None and self._open_pipeline_mode_callback is not None:
             self._open_pipeline_mode_callback(app.mode)
             return
         self.open_pipeline()
+
+    def _show_guide(self, app: HubApp) -> None:
+        guide = guide_for(app.id)
+        if guide is None:
+            return
+        dialog = HowToDialog(app.title, guide, lambda: self._launch_app(app), self)
+        dialog.setStyleSheet(self.styleSheet())
+        dialog.exec()
+
+    def _show_current_carousel_guide(self) -> None:
+        app = self.all_apps_carousel.current_app
+        if app is not None:
+            self._show_guide(app)
+
+    @staticmethod
+    def _getting_started(section: str) -> QFrame:
+        content = {
+            "Movement Analysis": (
+                ("1 · Prepare", "Choose the recording and matching AIHuMo workspace files."),
+                ("2 · Work", "Open the processing, annotation, alignment, or graph workflow."),
+                ("3 · Review", "Check warnings, verify session identity, and save or export."),
+            ),
+            "Cognitive Games": (
+                ("1 · Choose", "Select the skill, difficulty, and number of rounds."),
+                ("2 · Play", "Complete each prompt at a comfortable, focused pace."),
+                ("3 · Review", "Use accuracy and timing to choose the next difficulty."),
+            ),
+        }.get(section, (
+            ("1 · Prepare", "Clear the play area, position the camera, and choose a safe level."),
+            ("2 · Calibrate", "Complete the movement-range check before beginning the round."),
+            ("3 · Review", "Inspect accuracy, timing, control, and consistency after play."),
+        ))
+        panel = QFrame(objectName="gettingStartedPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 16, 18, 18)
+        layout.setSpacing(12)
+        layout.addWidget(QLabel("Getting started", objectName="sectionTitle"))
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        for title, description in content:
+            item = QFrame(objectName="gettingStartedStep")
+            item_layout = QVBoxLayout(item)
+            title_label = QLabel(title, objectName="guideSectionTitle")
+            body = QLabel(description, objectName="mutedText")
+            body.setWordWrap(True)
+            item_layout.addWidget(title_label)
+            item_layout.addWidget(body)
+            item_layout.addStretch(1)
+            row.addWidget(item, 1)
+        layout.addLayout(row)
+        return panel
 
     def _resume_mode(self, mode: int) -> None:
         if self._resume_mode_callback is not None:
@@ -959,7 +1314,17 @@ class MainHubDialog(QDialog):
         app = self.app_by_id.get(game_id)
         if app is not None:
             self._remember_app(app)
-        MovementGameDialog(game_id, self).exec()
+        self._exec_subapp_dialog(MovementGameDialog(
+            game_id, self, preferences=self.preferences
+        ))
+
+    @staticmethod
+    def _exec_subapp_dialog(dialog: QDialog) -> int:
+        """Open games maximized while retaining the native title-bar controls."""
+        dialog.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        dialog.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        dialog.showMaximized()
+        return dialog.exec()
 
     def _select_page(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
@@ -977,14 +1342,20 @@ class MainHubDialog(QDialog):
         if app is None:
             self.carousel_status.setText("No matching apps")
             self.carousel_open.setEnabled(False)
+            self.carousel_guide.setEnabled(False)
             return
         self.carousel_status.setText(f"{index + 1} / {len(self.all_apps_carousel.apps)}  ·  {app.title}")
         self.carousel_open.setEnabled(True)
+        self.carousel_guide.setEnabled(True)
 
-    def _visual_option_changed(self, *_args) -> None:
-        if not hasattr(self, "theme_combo"):
-            return
-        self.preferences.save(replace(self.preferences.values, theme=self.theme_combo.currentText()))
+    def _toggle_theme(self, *_args) -> None:
+        theme = "Light" if self.preferences.values.theme == "Dark" else "Dark"
+        self.preferences.save(replace(self.preferences.values, theme=theme))
+        self._apply_preferences()
+
+    def _toggle_artwork_style(self, *_args) -> None:
+        style = "Focus Mode" if self.preferences.values.hub_artwork_style == "Professional" else "Professional"
+        self.preferences.save(replace(self.preferences.values, hub_artwork_style=style))
         self._apply_preferences()
 
     def _open_settings(self) -> None:
@@ -993,12 +1364,23 @@ class MainHubDialog(QDialog):
 
     def _apply_preferences(self) -> None:
         theme = "Dark" if self.preferences.values.theme == "Dark" else "Light"
-        self.theme_combo.blockSignals(True)
-        self.theme_combo.setCurrentText(theme)
-        self.theme_combo.blockSignals(False)
+        self.theme_button.blockSignals(True)
+        self.theme_button.setChecked(theme == "Dark")
+        self.theme_button.setText("☾  Dark" if theme == "Dark" else "☀  Light")
+        self.theme_button.blockSignals(False)
+        artwork_style = self.preferences.values.hub_artwork_style
+        self.artwork_button.blockSignals(True)
+        self.artwork_button.setChecked(artwork_style == "Professional")
+        self.artwork_button.setText("Professional" if artwork_style == "Professional" else "Focus Mode")
+        self.artwork_button.blockSignals(False)
         self.setStyleSheet(self._stylesheet(theme == "Dark"))
+        for scroll in self.parallax_scrolls:
+            scroll.apply_preferences(self.preferences.values, theme == "Dark")
         if hasattr(self, "all_apps_carousel"):
             self.all_apps_carousel.set_dark(theme == "Dark")
+            self.all_apps_carousel.set_artwork_style(artwork_style)
+        for thumbnail in self.findChildren(ThumbnailPlaceholder):
+            thumbnail.set_artwork_style(artwork_style)
 
     @staticmethod
     def _stylesheet(dark: bool) -> str:
@@ -1015,7 +1397,8 @@ class MainHubDialog(QDialog):
                 "placeholder": "#eef2f7", "scroll": "#a8b6ca", "scroll_hover": "#22bdd1",
             }
         return f"""
-            QDialog, QWidget#hubBody {{ background: {colors['window']}; color: {colors['text']}; font-family: "Segoe UI"; }}
+            QDialog {{ background: {colors['window']}; color: {colors['text']}; font-family: "Segoe UI"; }}
+            QWidget#hubBody {{ background: transparent; color: {colors['text']}; font-family: "Segoe UI"; }}
             QWidget, QLabel, QPushButton, QCheckBox, QRadioButton, QGroupBox, QTabWidget {{ color: {colors['text']}; }}
             QPushButton {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 9px; padding: 7px 10px; }}
             QPushButton:hover {{ border-color: {colors['accent']}; }}
@@ -1034,10 +1417,19 @@ class MainHubDialog(QDialog):
             QLabel#categoryChip {{ color: {colors['accent']}; font-weight: 700; }}
             QLabel#footerText {{ color: {colors['muted']}; font-weight: 650; }}
             QFrame#hubFooter {{ border-top: 1px solid {colors['border']}; }}
-            QLabel#thumbnailPlaceholder {{ background: {colors['placeholder']}; border: 1px dashed {colors['border']}; border-radius: 12px; }}
-            QFrame#recentAppCard, QFrame#appDetailCard {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 15px; }}
+            QLabel#thumbnailPlaceholder {{ background: {colors['placeholder']}; border: 2px solid {colors['border']}; border-radius: 12px; }}
+            QFrame#recentAppCard, QFrame#appDetailCard {{ background: {colors['card']}; border: 2px solid {colors['border']}; border-radius: 15px; }}
             QFrame#recentAppCard:hover, QFrame#appDetailCard:hover {{ border: 2px solid {colors['accent']}; }}
+            QFrame#gettingStartedPanel {{ background: {colors['panel']}; border: 2px solid {colors['border']}; border-radius: 15px; }}
+            QFrame#gettingStartedStep {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 12px; }}
+            QLabel#guideTitle {{ font-size: 27px; font-weight: 800; }}
+            QLabel#guidePurpose {{ color: {colors['muted']}; font-size: 15px; padding-bottom: 8px; }}
+            QLabel#guideSectionTitle {{ font-size: 16px; font-weight: 750; padding-top: 6px; }}
+            QLabel#guideText {{ color: {colors['text']}; font-size: 14px; line-height: 1.35; }}
+            QLabel#guideSafety {{ color: {colors['text']}; background: {colors['placeholder']}; border: 1px solid {colors['border']}; border-radius: 10px; padding: 12px; }}
+            QFrame#guideVideoPlaceholder {{ background: {colors['placeholder']}; border: 2px dashed {colors['border']}; border-radius: 12px; }}
             QFrame#categorySection {{ background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 14px; }}
+            QFrame#focusedCategorySection {{ background: transparent; border: none; }}
             QWidget#categoryContent {{ background: transparent; }}
             QPushButton#categoryHeader {{ color: {colors['text']}; background: transparent; border: none; padding: 16px 18px; text-align: left; font-size: 17px; font-weight: 750; }}
             QPushButton#categoryHeader:hover {{ color: {colors['accent']}; }}
@@ -1048,13 +1440,17 @@ class MainHubDialog(QDialog):
             QPushButton#primaryButton:hover {{ background: {colors['accent']}; color: #07152f; }}
             QPushButton#primaryButton:disabled {{ background: {colors['border']}; color: {colors['muted']}; }}
             QPushButton#quietButton {{ color: {colors['text']}; background: transparent; border: 1px solid {colors['border']}; border-radius: 11px; padding: 7px 10px; }}
+            QPushButton#themeToggle {{ color: {colors['text']}; background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 11px; min-width: 84px; padding: 7px 11px; font-weight: 700; }}
+            QPushButton#themeToggle:hover, QPushButton#themeToggle:checked {{ border-color: {colors['accent']}; background: {colors['card']}; }}
+            QPushButton#artworkToggle {{ color: {colors['text']}; background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 11px; min-width: 106px; padding: 7px 11px; font-weight: 700; }}
+            QPushButton#artworkToggle:hover, QPushButton#artworkToggle:checked {{ border-color: {colors['accent2']}; background: {colors['card']}; }}
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QTableView, QTreeView {{ color: {colors['text']}; background: {colors['panel']}; border: 1px solid {colors['border']}; border-radius: 12px; padding: 7px 10px; selection-background-color: {colors['accent2']}; selection-color: white; }}
             QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{ color: {colors['muted']}; background: {colors['placeholder']}; }}
             QComboBox QAbstractItemView, QMenu {{ color: {colors['text']}; background: {colors['panel']}; border: 1px solid {colors['border']}; selection-background-color: {colors['accent2']}; selection-color: white; outline: none; }}
             QComboBox QAbstractItemView::item {{ color: {colors['text']}; min-height: 28px; padding: 4px 8px; }}
             QComboBox QAbstractItemView::item:selected {{ color: white; background: {colors['accent2']}; }}
             QToolTip {{ color: {colors['text']}; background: {colors['card']}; border: 1px solid {colors['accent']}; padding: 5px; }}
-            QScrollArea {{ border: none; background: {colors['window']}; }}
+            QScrollArea {{ border: none; background: transparent; }}
             QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px; }}
             QScrollBar::handle:vertical {{ background: {colors['scroll']}; min-height: 40px; border-radius: 5px; }}
             QScrollBar::handle:vertical:hover {{ background: {colors['scroll_hover']}; }}

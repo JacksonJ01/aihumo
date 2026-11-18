@@ -40,6 +40,7 @@ from aihumo.annotations import (
 from aihumo.config import load_config
 from aihumo.features import CROSS_MEAN_PREFIX, LEGACY_ANGLE_PREFIX, MEAN_ANGLE_PREFIX, PROJECTED_ANGLE_PREFIX, TORSO_ANGLE_PREFIX, WORLD_ANGLE_PREFIX
 from aihumo.rep_detection import RepDetector, save_rep_suggestions
+from aihumo.annotation_suggestions import update_suggestion_review
 from aihumo.storage import annotation_json_for_features, load_json, save_json_atomic
 from aihumo.exercise_library import (
     exercise_options,
@@ -53,8 +54,10 @@ from .common import DataFrameModel, ReviewWindow, close_and_return
 from .graph_viewer import InteractiveGraphViewer, open_graph_viewer
 from .joint_graph import GraphAngleSelection, graph_angle_traces
 from .playback import FrameBuffer, FrameNavigationButton, FramePlayback, open_review_video, review_window_is_covered
-from .preferences import DEFAULT_FRAME_JUMP, MAX_FRAME_JUMP
+from .preferences import DEFAULT_FRAME_JUMP, MAX_FRAME_JUMP, PreferencesDialog
+from .subapp_style import subapp_stylesheet
 from .trim_subvideos import TrimSubVideosDialog
+from .suggestion_review import SuggestionReviewDialog
 
 LOGGER = logging.getLogger("AIHuMoDataStudio.Mode1")
 
@@ -731,6 +734,8 @@ class AnnotationStudio(ReviewWindow):
         while owner is not None and not hasattr(owner, "preferences"):
             owner = owner.parentWidget()
         self._preference_store = getattr(owner, "preferences", None)
+        if self._preference_store is not None:
+            self.setStyleSheet(subapp_stylesheet(self._preference_store.values.theme))
         if embedded:
             self.setWindowFlags(Qt.WindowType.Widget)
         self._embedded = embedded
@@ -762,6 +767,15 @@ class AnnotationStudio(ReviewWindow):
         if "frame_id" not in self.dataframe.columns or not self.dataframe["frame_id"].is_monotonic_increasing:
             raise ValueError("Feature Parquet frame_id must be present and ordered for synchronized navigation.")
         self.metadata = load_json(self.metadata_path) if self.metadata_path.exists() else {}
+        suggested_path = self.metadata.get("annotation_suggestions")
+        self.suggestions_path = (
+            Path(suggested_path) if suggested_path
+            else self.parquet_path.parent.parent / "metadata" /
+            (self.parquet_path.stem.replace("_features", "_annotation_suggestions") + ".json")
+        )
+        self._suggestion_document: dict | None = None
+        self._suggestion_dialog: SuggestionReviewDialog | None = None
+        self._active_suggestion_id: str | None = None
         self.annotation_state: AnnotationState | None = None
         self.current_frame = 0
         self._deferred_linked_frame = None
@@ -937,6 +951,10 @@ class AnnotationStudio(ReviewWindow):
         self.back_button.setToolTip("Close the annotation workspace and return to the launcher.")
         self.back_button.clicked.connect(self._back)
         header.addWidget(self.back_button)
+        if self._preference_store is not None and not self._embedded:
+            self.settings_button = QPushButton("Settings")
+            self.settings_button.clicked.connect(self.open_settings)
+            header.addWidget(self.settings_button)
         self.workspace_label = QLabel("Mode 1 Annotation Studio")
         header.addWidget(self.workspace_label, 1)
         self.frame_spin = QSpinBox()
@@ -1075,6 +1093,8 @@ class AnnotationStudio(ReviewWindow):
         annotations_layout.setContentsMargins(0, 0, 0, 0)
         table_header = QHBoxLayout()
         table_header.addWidget(QLabel("Temporal annotations"), 1)
+        self.review_suggestions_button = QPushButton("Review suggestions…", clicked=self.open_suggestion_review)
+        table_header.addWidget(self.review_suggestions_button)
         self.show_all_annotation_layers = QCheckBox("Show all layers")
         self.show_all_annotation_layers.setToolTip("Show the full table or only rows for the editor's current layer.")
         table_header.addWidget(self.show_all_annotation_layers)
@@ -1128,10 +1148,179 @@ class AnnotationStudio(ReviewWindow):
         self.main_splitter = splitter
         main.addWidget(splitter, 1)
         self.setCentralWidget(central)
+        self._refresh_suggestion_button()
         self.refresh_annotation_table()
 
     def _back(self):
         close_and_return(self, self._linked_graph_viewer)
+
+    def open_settings(self) -> None:
+        if self._preference_store is None:
+            return
+        if PreferencesDialog(self._preference_store, self).exec() == QDialog.DialogCode.Accepted:
+            self.setStyleSheet(subapp_stylesheet(self._preference_store.values.theme))
+
+    def _load_suggestions(self) -> dict | None:
+        try:
+            self._suggestion_document = load_json(self.suggestions_path)
+        except FileNotFoundError:
+            self._suggestion_document = None
+        return self._suggestion_document
+
+    def _refresh_suggestion_button(self) -> None:
+        document = self._load_suggestions()
+        pending = sum(
+            item.get("review_status", "pending") == "pending"
+            for item in (document or {}).get("suggestions", [])
+        )
+        self.review_suggestions_button.setText(f"Review suggestions ({pending})")
+        self.review_suggestions_button.setEnabled(document is not None)
+        self.review_suggestions_button.setToolTip(
+            "Review Mode 0 proposals without replacing human-confirmed annotations."
+            if document is not None else "No Mode 0 annotation suggestion file was found for this recording."
+        )
+
+    def open_suggestion_review(self) -> None:
+        document = self._load_suggestions()
+        if document is None:
+            QMessageBox.information(self, "No suggestions", "No Mode 0 suggestion file is available for this recording.")
+            return
+        self._suggestion_dialog = SuggestionReviewDialog(
+            document,
+            on_accept=self._accept_suggestion,
+            on_reject=self._reject_suggestion,
+            on_edit=self._edit_suggestion,
+            on_goto=self._goto_suggestion,
+            parent=self,
+        )
+        self._suggestion_dialog.exec()
+        self._suggestion_dialog = None
+        self._refresh_suggestion_button()
+
+    def _goto_suggestion(self, suggestion: dict) -> bool:
+        return self.goto_frame(int(suggestion["start_frame"]))
+
+    def _suggestion_values(self, suggestion: dict) -> dict:
+        layer = str(suggestion.get("annotation_layer", "general"))
+        if layer == "form":
+            layer = "form_interval"
+        start_frame = int(suggestion["start_frame"])
+        end_frame = int(suggestion["end_frame"])
+        start_time = float(self._row_for_frame(start_frame)["timestamp_s"])
+        end_time = float(self._row_for_frame(end_frame)["timestamp_s"])
+        context, _ = self._context_for_frame(start_frame)
+        activity_state = (
+            str(suggestion.get("suggested_label"))
+            if layer == "activity_state" and suggestion.get("suggested_label") in ACTIVITY_STATES
+            else context.get("activity_state") or "active"
+        )
+        exercise = suggestion.get("exercise_hint") or context.get("exercise") or self.metadata.get("exercise_hint")
+        return {
+            "annotation_id": self.annotation_state.next_annotation_id(),
+            "segment_id": self.annotation_state.next_segment_id(),
+            "annotation_type": layer,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "start_time_s": start_time,
+            "end_time_s": end_time,
+            "duration_s": max(0.0, end_time - start_time),
+            "activity_state": activity_state,
+            "camera_angle": (
+                self.metadata.get("camera_angle") or self.metadata.get("viewpoint") or "N/A"
+                if layer == "activity_state" else None
+            ),
+            "exercise": exercise if layer in {"set", "rep", "phase"} else None,
+            "set_id": (
+                int(suggestion.get("set_id")) if suggestion.get("set_id") is not None
+                else context.get("set_id")
+            ) if layer in {"set", "rep", "phase"} else None,
+            "rep_id": (
+                int(suggestion.get("rep_id")) if suggestion.get("rep_id") is not None
+                else context.get("rep_id")
+            ) if layer in {"rep", "phase"} else None,
+            "phase": suggestion.get("suggested_label") if layer == "phase" else "none",
+            "form_label": "unlabeled",
+            "form_score": None,
+            "issue_type": [],
+            "error_category": [],
+            "affected_joints": [],
+            "notes": f"Accepted Mode 0 suggestion {suggestion.get('suggestion_id')}",
+        }
+
+    def _save_suggestion_status(
+        self,
+        suggestion_id: str,
+        status: str,
+        *,
+        values: dict | None = None,
+    ) -> bool:
+        document = self._load_suggestions()
+        if document is None:
+            return False
+        boundaries = None if values is None else {
+            key: values[key] for key in ("start_frame", "end_frame", "start_time_s", "end_time_s")
+        }
+        try:
+            updated = update_suggestion_review(
+                document,
+                suggestion_id,
+                status,
+                final_boundaries=boundaries,
+                accepted_annotation_id=values.get("annotation_id") if values is not None else None,
+            )
+            save_json_atomic(updated, self.suggestions_path)
+            self._suggestion_document = updated
+            if self._suggestion_dialog is not None:
+                self._suggestion_dialog.set_document(updated)
+            self._refresh_suggestion_button()
+            viewer = self.annotation_graph_window or self._linked_graph_viewer
+            if viewer is not None:
+                viewer._refresh_graph_annotations(viewer.graph)
+            return True
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Suggestion review warning", f"The annotation was preserved, but its proposal review state could not be saved.\n\n{exc}")
+            return False
+
+    def _accept_suggestion(self, suggestion: dict) -> bool:
+        if suggestion.get("review_status", "pending") != "pending":
+            return False
+        values = self._suggestion_values(suggestion)
+        try:
+            if not self._commit_annotation(values):
+                return False
+        except Exception as exc:
+            QMessageBox.warning(self, "Suggestion cannot be accepted", str(exc))
+            return False
+        self.refresh_annotation_table(select_annotation_id=values["annotation_id"])
+        self._refresh_summary()
+        self._save_suggestion_status(str(suggestion["suggestion_id"]), "accepted", values=values)
+        return True
+
+    def _reject_suggestion(self, suggestion: dict) -> bool:
+        return self._save_suggestion_status(str(suggestion["suggestion_id"]), "rejected")
+
+    def _edit_suggestion(self, suggestion: dict) -> bool:
+        values = self._suggestion_values(suggestion)
+        if not self.goto_frame(values["start_frame"]):
+            return False
+        self._active_suggestion_id = str(suggestion["suggestion_id"])
+        self.annotation_start_frame = values["start_frame"]
+        self.annotation_edit_end_frame = values["end_frame"]
+        layer_index = self.editor_annotation_type.findData(values["annotation_type"])
+        if layer_index >= 0:
+            self.editor_annotation_type.setCurrentIndex(layer_index)
+        self.editor_activity_state.setCurrentText(values["activity_state"])
+        self.editor_set_id.setValue(int(values.get("set_id") or 0))
+        self.editor_rep_id.setValue(int(values.get("rep_id") or 0))
+        self.editor_exercise_selector.set_value(values.get("exercise"))
+        self.editor_notes.setPlainText(values["notes"])
+        self.editor_range_label.setText(
+            f"Reviewing suggestion {self._active_suggestion_id}: frames {values['start_frame']}–{values['end_frame']}. "
+            "Adjust fields or navigate to a new end, then press S."
+        )
+        if self._suggestion_dialog is not None:
+            self._suggestion_dialog.hide()
+        return True
 
     def _navigation_button(self, text, direction, *, jump=False):
         return FrameNavigationButton(
@@ -1481,6 +1670,7 @@ class AnnotationStudio(ReviewWindow):
         self.annotation_start_frame = None
         self.annotation_edit_id = None
         self.annotation_edit_end_frame = None
+        self._active_suggestion_id = None
         self.editor_save_button.setText("Save range (S)")
         self.editor_range_label.setText("Press W to capture a start frame, navigate, then press S to save.")
 
@@ -1752,6 +1942,9 @@ class AnnotationStudio(ReviewWindow):
             return
         try:
             if self._commit_annotation(values, existing):
+                suggestion_id = self._active_suggestion_id
+                if suggestion_id is not None:
+                    self._save_suggestion_status(suggestion_id, "edited", values=values)
                 self._reset_annotation_draft()
                 self.refresh_annotation_table(select_annotation_id=values["annotation_id"])
                 self._refresh_summary()

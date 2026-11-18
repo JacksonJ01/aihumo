@@ -1,6 +1,7 @@
 """Mode 4 shows the saved pose at the video playhead."""
 from __future__ import annotations
 
+from pathlib import Path
 from time import monotonic
 
 import numpy as np
@@ -13,6 +14,7 @@ from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QTabWid
 
 from aihumo.features import CROSS_MEAN_PREFIX, LANDMARKS
 from aihumo.geometry import POSE_CONNECTIONS
+from aihumo.storage import load_json
 
 from .graph_navigation import FrameZoomToolbar, wheel_zoom_factor
 from .graph_viewer import InteractiveGraphViewer
@@ -29,8 +31,9 @@ _CONNECTIONS = np.asarray(POSE_CONNECTIONS)
 
 
 class PosePlot(QWidget):
-    def __init__(self, frames):
+    def __init__(self, frames, tracking_warnings=None):
         super().__init__()
+        self.tracking_warnings = list(tracking_warnings or [])
         self.poses = {}
         self.source = QComboBox()
         self.source.setAccessibleName("Pose source")
@@ -102,11 +105,15 @@ class PosePlot(QWidget):
             self.bones = Line3DCollection([], colors="#168b66", linewidths=2)
             self.axis.add_collection(self.bones, autolim=False)
             self.points, = self.axis.plot([], [], [], marker="o", linestyle="none", color="#3264ad", markersize=4)
+            self.warning_points, = self.axis.plot([], [], [], marker="o", linestyle="none", color="#e33f5f",
+                                                  markeredgecolor="#fff1f4", markersize=8)
             self.axis.set(xlabel=f"X ({unit})", ylabel=f"Depth Z ({unit})", zlabel=f"Up −Y ({unit})")
         else:
             self.bones = LineCollection([], colors="#168b66", linewidths=2)
             self.axis.add_collection(self.bones, autolim=False)
             self.points, = self.axis.plot([], [], marker="o", linestyle="none", color="#3264ad", markersize=4)
+            self.warning_points, = self.axis.plot([], [], marker="o", linestyle="none", color="#e33f5f",
+                                                  markeredgecolor="#fff1f4", markersize=8)
             self.axis.set(xlabel=f"X ({unit})", ylabel=f"Up −Y ({unit})", aspect="equal")
         self._reset_view()
         self.set_frame(self.frame)
@@ -203,8 +210,25 @@ class PosePlot(QWidget):
             self.points.set_data_3d(*points.T)
         else:
             self.points.set_data(*points.T)
+        warnings = [
+            warning for warning in self.tracking_warnings
+            if int(warning.get("start_frame", -1)) <= frame <= int(warning.get("end_frame", -1))
+        ]
+        affected = sorted({
+            int(str(name).removeprefix("lm"))
+            for warning in warnings for name in warning.get("affected_landmarks", [])
+            if str(name).removeprefix("lm").isdigit()
+        })
+        affected_points = pose[[index for index in affected if 0 <= index < LANDMARKS and visible[index]]]
+        if self.spatial:
+            self.warning_points.set_data_3d(*affected_points.T if len(affected_points) else ([], [], []))
+        else:
+            self.warning_points.set_data(*affected_points.T if len(affected_points) else ([], []))
         hint = "Left-drag to rotate the world pose, including during playback." if self.spatial else "Saved X and Y positions."
         message = f"{int(visible.sum())}/{LANDMARKS} landmarks. {hint}" if visible.any() else "No pose landmarks at this frame."
+        if warnings:
+            reasons = ", ".join(sorted({str(item.get("reason", "warning")).replace("_", " ") for item in warnings}))
+            message += f" Tracking warning (not a form error): {reasons}."
         self.detail.setText(f"Frame {frame:,} · {message}")
         self.canvas.draw_idle()
 
@@ -219,7 +243,14 @@ class PoseGraphViewer(InteractiveGraphViewer):
 
     def _build_ui(self, frames, frame_jump):
         super()._build_ui(frames, frame_jump)
-        self.pose_plot = PosePlot(frames)
+        warnings = []
+        quality_path = self.metadata.get("quality_report")
+        if quality_path and Path(quality_path).is_file():
+            try:
+                warnings = load_json(quality_path).get("tracking_anomalies", {}).get("warnings", [])
+            except (OSError, ValueError, TypeError):
+                warnings = []
+        self.pose_plot = PosePlot(frames, warnings)
         self.pose_tabs = QTabWidget()
         sizes = self.splitter.sizes()
         self.splitter.replaceWidget(1, self.pose_tabs)

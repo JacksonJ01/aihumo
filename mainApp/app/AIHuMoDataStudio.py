@@ -29,10 +29,20 @@ from .mode2_alignment import SessionAlignmentWindow
 from .graph_viewer import open_graph_viewer
 from .common import suspend_other_reviews
 from .pose_viewer import PoseGraphViewer
-from .preferences import PreferencesDialog, PreferenceStore, StartupSetupDialog
+from .preferences import (
+    PreferencesDialog, PreferenceStore, StartupSetupDialog, apply_installer_bootstrap,
+)
+from .app_paths import default_processed_root, user_data_dir
 from .quality_review import QualityReviewDialog
 from .processing_resume import processing_fields
 from .main_hub import MainHubDialog
+from .branding import (
+    STARTUP_SPLASH_MS,
+    application_icon,
+    configure_process_identity,
+    create_startup_splash,
+)
+from .subapp_style import subapp_stylesheet
 from aihumo.recent_work import RecentWorkStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -108,6 +118,7 @@ class HomeWindow(QMainWindow):
         state_dir: Path | None = None,
         processed_root: Path | None = None,
         return_to_hub: Callable[[], None] | None = None,
+        preferences: PreferenceStore | None = None,
     ):
         super().__init__()
         self._return_to_hub_callback = return_to_hub
@@ -118,8 +129,8 @@ class HomeWindow(QMainWindow):
         self._graph_mode = 3
         self.alignment_window = None
         self._using_default_state = state_dir is None
-        self.processed_root = processed_root if processed_root is not None else PROJECT_ROOT / "data" / "processed"
-        state_dir = state_dir if state_dir is not None else PROJECT_ROOT / ".aihumo"
+        self.processed_root = processed_root if processed_root is not None else default_processed_root()
+        state_dir = state_dir if state_dir is not None else user_data_dir()
         self.recent_work = RecentWorkStore(state_dir / "recent_work.json")
         self.recent_graphs = RecentWorkStore(state_dir / "recent_graphs.json")
         self.recent_poses = RecentWorkStore(state_dir / "recent_poses.json")
@@ -129,14 +140,16 @@ class HomeWindow(QMainWindow):
         self.resume_stores = {0: self.recent_processing, 1: self.recent_work, 2: self.recent_alignments,
                               3: self.recent_graphs, 4: self.recent_poses}
         self._selected_mode = 1
-        self.preferences = PreferenceStore(state_dir / "settings.json")
+        self.preferences = preferences or PreferenceStore(state_dir / "settings.json")
+        self.setStyleSheet(subapp_stylesheet(self.preferences.values.theme))
 
         central = QWidget()
+        central.setObjectName("subAppBody")
         layout = QVBoxLayout(central)
         layout.setContentsMargins(50, 45, 50, 45)
 
         title = QLabel("AIHuMo Data Studio")
-        title.setStyleSheet("font-size: 28px; font-weight: 700;")
+        title.setObjectName("subAppTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header = QHBoxLayout()
         self.back_to_hub_button = QPushButton("← Back to Main Hub")
@@ -255,11 +268,16 @@ class HomeWindow(QMainWindow):
 
     def _apply_launcher_accent(self):
         color = self.preferences.values.launcher_accent
+        dark = self.preferences.values.theme == "Dark"
+        background = "#16263f" if dark else "#ffffff"
+        hover = "#101d33" if dark else "#eef2f7"
+        text = "#f5f7ff" if dark else "#15213d"
+        border = "#354967" if dark else "#d4ddea"
         for button in (*self.workflows.buttons(), self.process_button, self.batch_button):
             button.setStyleSheet(
-                "QPushButton { border: 2px solid palette(mid); border-radius: 6px;"
-                " background: palette(button); color: palette(button-text); padding: 7px; }"
-                "QPushButton:hover { background: palette(alternate-base); }"
+                f"QPushButton {{ border: 1px solid {border}; border-radius: 12px;"
+                f" background: {background}; color: {text}; padding: 10px; font-weight: 650; }}"
+                f"QPushButton:hover {{ background: {hover}; border-color: #36c9d8; }}"
                 f"QPushButton:checked {{ border: 3px solid {color}; }}"
             )
 
@@ -325,7 +343,12 @@ class HomeWindow(QMainWindow):
 
     def open_settings(self):
         if PreferencesDialog(self.preferences, self).exec() == QDialog.DialogCode.Accepted:
-            self._apply_launcher_accent()
+            self.apply_preferences()
+
+    def apply_preferences(self):
+        """Refresh the pipeline and every child dialog from shared settings."""
+        self.setStyleSheet(subapp_stylesheet(self.preferences.values.theme))
+        self._apply_launcher_accent()
 
     def open_main_hub(self):
         if self._return_to_hub_callback is not None:
@@ -349,7 +372,32 @@ class HomeWindow(QMainWindow):
             return
         setup = dialog.setup
         if setup.get("open_video") and setup.get("video"):
-            QTimer.singleShot(0, lambda: self.open_starter_video(setup["video"]))
+            QTimer.singleShot(0, lambda: self.open_starter_setup(setup))
+
+    def open_starter_setup(self, setup: dict) -> None:
+        """Open an installer/onboarding recording bundle without another picker."""
+        features = Path(setup.get("features", "")).expanduser()
+        skeleton = Path(setup.get("skeleton", "")).expanduser()
+        annotations = Path(setup.get("annotations", "")).expanduser()
+        if features.is_file() and skeleton.is_file():
+            try:
+                self._select_mode(1)
+                self.annotation_window = open_annotation_studio(
+                    self,
+                    video_path=skeleton,
+                    parquet_path=features,
+                    annotation_json_path=str(annotations) if annotations.is_file() else None,
+                    frame_jump=self.preferences.values.default_frame_jump,
+                    preferences=self.preferences,
+                )
+                if self.annotation_window is not None:
+                    self.remember_window(self.annotation_window)
+                    self._activate_review(self.annotation_window)
+            except Exception as exc:
+                LOGGER.exception("Could not open starter recording bundle")
+                QMessageBox.critical(self, "Could Not Open Starter Recording", f"{type(exc).__name__}: {exc}")
+            return
+        self.open_starter_video(setup.get("video", ""))
 
     @staticmethod
     def _starter_artifacts(video: Path) -> tuple[Path | None, Path | None]:
@@ -793,10 +841,16 @@ class DesktopApplicationController:
     """Own the primary Hub and lazily-created AIHuMo pipeline window."""
 
     def __init__(self, *, state_dir: Path | None = None, processed_root: Path | None = None):
-        self.state_dir = state_dir if state_dir is not None else PROJECT_ROOT / ".aihumo"
-        self.processed_root = processed_root
+        self.state_dir = state_dir if state_dir is not None else user_data_dir()
+        self.processed_root = processed_root if processed_root is not None else default_processed_root()
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.processed_root.mkdir(parents=True, exist_ok=True)
         self.pipeline_window: HomeWindow | None = None
         self.preferences = PreferenceStore(self.state_dir / "settings.json")
+        try:
+            apply_installer_bootstrap(self.preferences)
+        except (OSError, ValueError):
+            LOGGER.exception("Could not import the installer setup plan")
         self.hub_window = MainHubDialog(
             open_pipeline=self.show_pipeline,
             open_pipeline_mode=self.show_pipeline_mode,
@@ -808,6 +862,8 @@ class DesktopApplicationController:
     def show_hub(self) -> None:
         if self.pipeline_window is not None:
             self.pipeline_window.hide()
+        self.preferences.reload()
+        self.hub_window._apply_preferences()
         self.hub_window.showMaximized()
         self.hub_window.raise_()
         self.hub_window.activateWindow()
@@ -818,7 +874,10 @@ class DesktopApplicationController:
                 state_dir=self.state_dir,
                 processed_root=self.processed_root,
                 return_to_hub=self.show_hub,
+                preferences=self.preferences,
             )
+        self.preferences.reload()
+        self.pipeline_window.apply_preferences()
         self.hub_window.hide()
         self.pipeline_window.showMaximized()
         self.pipeline_window.raise_()
@@ -836,13 +895,40 @@ class DesktopApplicationController:
         if self.pipeline_window is not None:
             QTimer.singleShot(0, self.pipeline_window.resume_current_work)
 
+    def start_first_run_setup(self) -> None:
+        """Open the app-owned setup review for a new or installer-seeded user."""
+        if self.preferences.values.setup_completed:
+            return
+        self.show_pipeline()
+        if self.pipeline_window is not None:
+            self.pipeline_window.open_startup_setup()
+
 def main():
+    configure_process_identity()
     app = QApplication(sys.argv)
     app.setApplicationName("AIHuMo Data Studio")
+    app.setApplicationDisplayName("AIHuMo Data Studio")
+    app.setOrganizationName("AIHuMo")
+    app.setDesktopFileName("AIHuMo.DataStudio")
+    app.setWindowIcon(application_icon())
+    splash = create_startup_splash()
+    if splash is not None:
+        splash.show()
+        app.processEvents()
     controller = DesktopApplicationController()
-    # The Main Hub is the stable first screen. The pipeline is created only
-    # when selected, so its setup and resume state do not appear over games.
+    # Construct and paint the Hub behind the splash.  The three-second timer
+    # begins only after initialization, so the artwork never disappears in a
+    # one-frame flash on faster machines.
     controller.show_hub()
+    if splash is not None:
+        splash.raise_()
+        splash.activateWindow()
+        def finish_startup() -> None:
+            splash.finish(controller.hub_window)
+            controller.start_first_run_setup()
+        QTimer.singleShot(STARTUP_SPLASH_MS, finish_startup)
+    else:
+        QTimer.singleShot(0, controller.start_first_run_setup)
     return app.exec()
 
 
